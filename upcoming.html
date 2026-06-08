@@ -1,0 +1,1323 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upcoming Set Championships</title>
+    <style>
+        *,
+        *::before,
+        *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #f1f5f9;
+            color: #1e293b;
+            min-height: 100vh;
+        }
+
+        html {
+            scroll-padding-top: 2.5rem;
+        }
+
+        header {
+            background: #1e293b;
+            color: #fff;
+            padding: 0 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            height: 52px;
+        }
+
+        header h1 {
+            font-size: 1.125rem;
+            font-weight: 600;
+            flex: 1;
+        }
+
+        header a {
+            color: #94a3b8;
+            text-decoration: none;
+            font-size: 0.8rem;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 0.25rem 0.75rem;
+            transition: color 0.15s, border-color 0.15s;
+        }
+
+        header a:hover {
+            color: #e2e8f0;
+            border-color: #94a3b8;
+        }
+
+        /* ── Postcode entry screen ── */
+        #entry-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: calc(100vh - 52px);
+            padding: 2rem;
+            gap: 1.5rem;
+        }
+
+        .hero {
+            text-align: center;
+        }
+
+        .hero h2 {
+            font-size: 1.75rem;
+            font-weight: 700;
+        }
+
+        .hero p {
+            color: #64748b;
+            margin-top: 0.5rem;
+            max-width: 44ch;
+            line-height: 1.6;
+        }
+
+        .postcode-form {
+            display: flex;
+            gap: 0.5rem;
+            width: 100%;
+            max-width: 380px;
+        }
+
+        .postcode-form select {
+            flex: 1;
+            padding: 0.625rem 0.875rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 1rem;
+            background: #fff;
+            outline: none;
+            transition: border-color 0.15s;
+            cursor: pointer;
+        }
+
+        .postcode-form select:focus {
+            border-color: #2563eb;
+        }
+
+        .postcode-form button,
+        .btn-primary {
+            padding: 0.625rem 1.25rem;
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 0.9375rem;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s;
+        }
+
+        .postcode-form button:hover,
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+
+        .error-msg {
+            color: #dc2626;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 6px;
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            max-width: 380px;
+            text-align: center;
+        }
+
+        /* ── Results screen ── */
+        #results-screen {
+            display: none;
+        }
+
+        .results-header {
+            background: #fff;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .results-header h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            flex: 1;
+            min-width: 0;
+        }
+
+        #change-postcode-btn {
+            background: transparent;
+            border: 1px solid #cbd5e1;
+            color: #64748b;
+            border-radius: 6px;
+            padding: 0.3rem 0.75rem;
+            font: inherit;
+            font-size: 0.8rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: border-color 0.15s, color 0.15s;
+        }
+
+        #change-postcode-btn:hover {
+            border-color: #94a3b8;
+            color: #1e293b;
+        }
+
+        .content-wrap {
+            padding: 1.5rem;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        /* ── Controls ── */
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1.25rem;
+            flex-wrap: wrap;
+        }
+
+        .controls input[type="text"] {
+            flex: 1;
+            max-width: 340px;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .controls input[type="text"]:focus {
+            border-color: #2563eb;
+        }
+
+        .count-label {
+            color: #94a3b8;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+
+        .mini-btn {
+            background: transparent;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            color: #64748b;
+            font: inherit;
+            font-size: 0.78rem;
+            padding: 0.2rem 0.6rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: border-color 0.15s, color 0.15s;
+        }
+
+        .mini-btn:hover {
+            border-color: #94a3b8;
+            color: #1e293b;
+        }
+
+        .day-nav-wrap {
+            position: -webkit-sticky;
+            position: sticky;
+            top: 0;
+            z-index: 30;
+        }
+
+        .day-nav {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 0.5rem 0.625rem;
+            margin-bottom: 1rem;
+            max-width: 1100px;
+            margin-left: auto;
+            margin-right: auto;
+            box-sizing: border-box;
+            width: calc(100% - 3rem);
+        }
+
+        .day-nav-inner {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .day-nav-label {
+            color: #64748b;
+            font-size: 0.8rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .day-nav-select {
+            min-width: 240px;
+            max-width: 100%;
+            padding: 0.28rem 0.45rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 0.78rem;
+            color: #0f172a;
+            background: #fff;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .day-nav-select:focus {
+            border-color: #94a3b8;
+        }
+
+        /* ── Table ── */
+        .table-wrap {
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+            background: #fff;
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+            table-layout: fixed;
+        }
+
+        thead th {
+            background: #f8fafc;
+            text-align: left;
+            padding: 0.625rem 0.875rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            border-bottom: 1px solid #e2e8f0;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        thead th:hover {
+            color: #1e293b;
+        }
+
+        thead th.sort-asc::after {
+            content: ' ↑';
+            color: #2563eb;
+        }
+
+        thead th.sort-desc::after {
+            content: ' ↓';
+            color: #2563eb;
+        }
+
+        tbody td {
+            padding: 0.625rem 0.875rem;
+            border-bottom: 1px solid #f1f5f9;
+            vertical-align: middle;
+        }
+
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        tbody tr:hover td {
+            background: #f8fafc;
+        }
+
+        .day-group {
+            margin-bottom: 1.75rem;
+            scroll-margin-top: 2.5rem;
+        }
+
+        .day-heading {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 0.5rem;
+        }
+
+        .muted {
+            color: #94a3b8;
+        }
+
+        .badge-na {
+            color: #94a3b8;
+            font-style: italic;
+            font-size: 0.85rem;
+        }
+
+        .link-icon {
+            font-size: 0.9rem;
+            text-decoration: none;
+            color: #2563eb;
+        }
+
+        .link-icon:hover {
+            color: #1d4ed8;
+        }
+
+        td.numeric {
+            text-align: right;
+        }
+
+        /* ── Loading state ── */
+        #loading {
+            display: none;
+            text-align: center;
+            padding: 3rem;
+            color: #64748b;
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid #e2e8f0;
+            border-top-color: #2563eb;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            margin: 0 auto 1rem;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        /* ── Card view ── */
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .card {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 0.5rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .card-venue {
+            font-weight: 600;
+            font-size: 0.95rem;
+            flex: 1;
+        }
+
+        .card-travel {
+            font-size: 0.85rem;
+            color: #64748b;
+            white-space: nowrap;
+            display: none;
+        }
+
+        .card-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.875rem;
+            gap: 0.5rem;
+        }
+
+        .card-label {
+            color: #94a3b8;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            white-space: nowrap;
+        }
+
+        .card-links {
+            margin-top: 0.4rem;
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        /* ── View toggle ── */
+        .view-toggle {
+            display: flex;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .toggle-btn {
+            background: transparent;
+            border: none;
+            padding: 0.4rem 0.75rem;
+            font: inherit;
+            font-size: 0.85rem;
+            cursor: pointer;
+            color: #64748b;
+            transition: background 0.15s, color 0.15s;
+            white-space: nowrap;
+        }
+
+        .toggle-btn.active {
+            background: #1e293b;
+            color: #fff;
+        }
+
+        .toggle-btn:not(.active):hover {
+            background: #f1f5f9;
+            color: #1e293b;
+        }
+
+        /* ── Sort select ── */
+        .sort-select {
+            padding: 0.4rem 0.5rem;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font: inherit;
+            font-size: 0.85rem;
+            background: #fff;
+            cursor: pointer;
+            outline: none;
+        }
+
+        .sort-select:focus {
+            border-color: #2563eb;
+        }
+
+        /* ── Cat fact ── */
+        .cat-fact-section {
+            margin-bottom: 1.75rem;
+            background: #f0f9ff;
+            border: 1px solid #bae6fd;
+            border-radius: 8px;
+            padding: 0.875rem 1rem;
+        }
+
+        .cat-fact-inner {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+        }
+
+        .cat-fact-emoji {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            flex-shrink: 0;
+        }
+
+        #cat-fact-text {
+            flex: 1;
+            font-size: 0.875rem;
+            color: #0c4a6e;
+            line-height: 1.6;
+            margin: 0;
+        }
+
+        .cat-fact-btn {
+            flex-shrink: 0;
+            background: transparent;
+            border: 1px solid #7dd3fc;
+            border-radius: 6px;
+            color: #0369a1;
+            font: inherit;
+            font-size: 0.78rem;
+            padding: 0.2rem 0.6rem;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background 0.15s;
+        }
+
+        .cat-fact-btn:hover {
+            background: #e0f2fe;
+        }
+
+        /* ── Mobile ── */
+        @media (max-width: 640px) {
+            header {
+                padding: 0 0.75rem;
+            }
+
+            .results-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.4rem;
+            }
+
+            .results-header h2 {
+                flex: none;
+            }
+
+            .content-wrap {
+                padding: 0.875rem 0.75rem;
+            }
+
+            .day-nav-wrap {
+                padding: 0;
+            }
+
+            .controls input[type="text"] {
+                max-width: none;
+                min-width: 0;
+            }
+
+            .day-nav-inner {
+                flex-wrap: wrap;
+            }
+
+            .day-nav {
+                width: calc(100% - 1.5rem);
+            }
+
+            .day-nav-select {
+                min-width: 0;
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <h1>🎴 Upcoming Set Championships</h1>
+        <a href="index.html">Stats dashboard →</a>
+    </header>
+
+    <!-- ═══════════════════════════════════════════════════════════
+     POSTCODE ENTRY SCREEN
+════════════════════════════════════════════════════════════ -->
+    <div id="entry-screen">
+        <div class="hero">
+            <h2>Find events near you</h2>
+            <p>Choose your postcode to load upcoming set championship events, sorted by travel time.</p>
+        </div>
+
+        <form class="postcode-form" id="postcode-form">
+            <select id="postcode-select">
+                <option value="">Loading…</option>
+            </select>
+            <button type="submit">Load</button>
+        </form>
+
+        <div id="entry-error" class="error-msg" style="display:none"></div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════
+     LOADING
+════════════════════════════════════════════════════════════ -->
+    <div id="loading">
+        <div class="spinner"></div>
+        <p>Loading events…</p>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════
+     RESULTS SCREEN
+════════════════════════════════════════════════════════════ -->
+    <div id="results-screen">
+        <div class="results-header">
+            <h2 id="results-title"></h2>
+            <span id="last-updated" style="font-size:0.8rem;color:#94a3b8"></span>
+            <button id="change-postcode-btn">Change postcode</button>
+        </div>
+
+        <div class="day-nav-wrap">
+            <div id="day-nav" class="day-nav" style="display:none"></div>
+        </div>
+
+        <div class="content-wrap">
+            <div class="controls">
+                <input type="text" id="venue-filter" placeholder="Filter by venue or location…" autocomplete="off">
+                <select id="sort-select" class="sort-select">
+                    <option value="travel:1">Travel (nearest first)</option>
+                    <option value="travel:-1">Travel (farthest first)</option>
+                    <option value="venue:1">Venue A→Z</option>
+                    <option value="signed_up:-1">Signed up (most first)</option>
+                    <option value="last_champ:-1">Previous attendance (most first)</option>
+                </select>
+                <div class="view-toggle">
+                    <button id="btn-table-view" class="toggle-btn">Table</button>
+                    <button id="btn-card-view" class="toggle-btn">Cards</button>
+                </div>
+                <span id="event-count" class="count-label"></span>
+            </div>
+
+            <div id="recent-section" class="day-group">
+                <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap">
+                    <h3 class="day-heading" style="margin:0">New competitions <span id="recent-count"
+                            style="color:#64748b;font-weight:600;font-size:0.82rem"></span></h3>
+                    <button id="recent-toggle-btn" class="mini-btn">Hide</button>
+                    <span style="font-size:0.85rem;color:#64748b">&mdash; added in the last</span>
+                    <select id="new-days-select"
+                        style="padding:0.2rem 0.4rem;border:1px solid #cbd5e1;border-radius:4px;font:inherit;font-size:0.85rem;background:#fff;cursor:pointer">
+                        <option value="1" selected>1</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5">5</option>
+                        <option value="7">7</option>
+                    </select>
+                    <span style="font-size:0.85rem;color:#64748b">day(s)</span>
+                </div>
+                <div id="recent-container"></div>
+            </div>
+
+            <div id="cat-fact-section" class="cat-fact-section" style="display:none">
+                <div class="cat-fact-inner">
+                    <span class="cat-fact-emoji">🐱</span>
+                    <p id="cat-fact-text"></p>
+                    <button id="cat-fact-btn" class="cat-fact-btn">New fact</button>
+                </div>
+            </div>
+
+            <div id="days-container"></div>
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════
+        //  CSV parsing (RFC 4180 — handles quoted fields with commas)
+        // ═══════════════════════════════════════════════════════════
+        function parseCSV(text) {
+            const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+            if (!lines.length) return [];
+
+            function parseLine(line) {
+                const fields = [];
+                let i = 0;
+                while (i < line.length) {
+                    if (line[i] === '"') {
+                        // Quoted field
+                        let val = '';
+                        i++; // skip opening quote
+                        while (i < line.length) {
+                            if (line[i] === '"' && line[i + 1] === '"') {
+                                val += '"'; i += 2;
+                            } else if (line[i] === '"') {
+                                i++; break;
+                            } else {
+                                val += line[i++];
+                            }
+                        }
+                        if (line[i] === ',') i++;
+                        fields.push(val);
+                    } else {
+                        const end = line.indexOf(',', i);
+                        if (end === -1) {
+                            fields.push(line.slice(i));
+                            break;
+                        }
+                        fields.push(line.slice(i, end));
+                        i = end + 1;
+                    }
+                }
+                return fields;
+            }
+
+            const headers = parseLine(lines[0]);
+            const rows = [];
+            for (let l = 1; l < lines.length; l++) {
+                const line = lines[l].trim();
+                if (!line) continue;
+                const vals = parseLine(line);
+                const obj = {};
+                headers.forEach((h, i) => obj[h] = vals[i] ?? '');
+                rows.push(obj);
+            }
+            return rows;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Travel time → sortable seconds (N/A → Infinity)
+        // ═══════════════════════════════════════════════════════════
+        function travelToSeconds(str) {
+            if (!str || str === 'N/A') return Infinity;
+            let secs = 0;
+            const h = str.match(/(\d+)h/);
+            const m = str.match(/(\d+)m/);
+            if (h) secs += parseInt(h[1]) * 3600;
+            if (m) secs += parseInt(m[1]) * 60;
+            return (h || m) ? secs : Infinity;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Postcode normalisation — uppercase and add space if missing
+        // ═══════════════════════════════════════════════════════════
+        function normalisePostcode(raw) {
+            const clean = raw.trim().toUpperCase().replace(/\s+/g, '');
+            if (clean.length < 5) return raw.trim().toUpperCase();
+            // Insert space before last 3 chars (standard UK format)
+            return clean.slice(0, -3) + ' ' + clean.slice(-3);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  CSV URL from postcode   e.g.  MK6  →  upcoming_MK6.csv
+        // ═══════════════════════════════════════════════════════════
+        function csvFilename(postcode) {
+            return 'upcoming_' + postcode.replace(/\s+/g, '_') + '.csv';
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  State
+        // ═══════════════════════════════════════════════════════════
+        let allRows = [];
+        let filterText = '';
+        let sortCol = 'travel';
+        let sortDir = 1;
+        let viewMode = 'table'; // 'table' or 'card'
+        let recentCollapsed = false;
+
+        // ═══════════════════════════════════════════════════════════
+        //  Preferences (localStorage)
+        // ═══════════════════════════════════════════════════════════
+        const PREFS_KEY = 'playhub-upcoming-prefs';
+        function loadPrefs() {
+            try { return JSON.parse(localStorage.getItem(PREFS_KEY) || '{}'); } catch { return {}; }
+        }
+        function savePrefs(updates) {
+            const p = loadPrefs();
+            Object.assign(p, updates);
+            localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Load CSV and render
+        // ═══════════════════════════════════════════════════════════
+        async function loadEventData(postcode) {
+            const norm = normalisePostcode(postcode);
+            const filename = csvFilename(norm);
+
+            showLoading();
+            try {
+                const resp = await fetch(filename);
+                if (!resp.ok) {
+                    throw new Error(
+                        resp.status === 404
+                            ? `No data found for ${norm}. Generate it with: uv run main.py upcoming-set-champs --postcode "${norm}"`
+                            : `Failed to load data (HTTP ${resp.status})`
+                    );
+                }
+                const lastModified = resp.headers.get('Last-Modified');
+                const text = await resp.text();
+                allRows = parseCSV(text);
+                if (!allRows.length) throw new Error('CSV file is empty.');
+
+                // Update URL so the page can be bookmarked / shared
+                const url = new URL(window.location);
+                url.searchParams.set('postcode', norm);
+                window.history.replaceState({}, '', url);
+
+                // keep sort preference; don't reset on postcode change
+                filterText = '';
+                document.getElementById('venue-filter').value = '';
+                document.getElementById('results-title').textContent =
+                    `Upcoming events — travelling from ${norm}`;
+                const updatedEl = document.getElementById('last-updated');
+                if (lastModified) {
+                    const d = new Date(lastModified);
+                    updatedEl.textContent = `Last change at ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })} ${d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`;
+                } else {
+                    updatedEl.textContent = '';
+                }
+                showResults();
+                renderTable();
+            } catch (err) {
+                showEntry();
+                showEntryError(err.message);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Render table
+        // ═══════════════════════════════════════════════════════════
+        function esc(str) {
+            return (str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function formatDate(iso) {
+            if (!iso) return 'Unknown date';
+            const d = new Date(iso + 'T00:00:00');
+            return d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        }
+
+        function renderRow(r) {
+            const travel = r['Travel time'] || 'N/A';
+            const routeLink = r['Route link'];
+            const eventLink = r['Event link'];
+            const lastChampLink = r['Last set champ link'];
+            const signedUp = r['Players signed up'];
+            const lastChamp = r['Players at last set champ'];
+            const postcode = r['Postcode'];
+            const price = r['Price'];
+
+            const links = [];
+            if (routeLink) links.push(`<a class="link-icon" href="${esc(routeLink)}" target="_blank" rel="noopener" title="Directions">🗺️</a>`);
+            if (eventLink) links.push(`<a class="link-icon" href="${esc(eventLink)}" target="_blank" rel="noopener" title="Event page">🔗</a>`);
+            if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
+
+            return `<tr>
+                <td style="font-weight:500">${esc(r['Venue']) || '—'}</td>
+                <td class="muted" style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r['Location'])}">${esc(postcode) || esc(r['Location']) || '—'}</td>
+                <td class="numeric">${signedUp !== '' && signedUp !== 'N/A' ? esc(signedUp) : '<span class="badge-na">—</span>'}</td>
+                <td class="numeric">${lastChamp !== '' && lastChamp !== 'N/A' ? esc(lastChamp) : '<span class="badge-na">—</span>'}</td>
+                <td>${price ? esc(price) : '<span class="badge-na">—</span>'}</td>
+                <td>${esc(travel)}</td>
+                <td style="white-space:nowrap">${links.join(' ')}</td>
+            </tr>`;
+        }
+
+        function renderCard(r) {
+            const travel = r['Travel time'] || 'N/A';
+            const routeLink = r['Route link'];
+            const eventLink = r['Event link'];
+            const lastChampLink = r['Last set champ link'];
+            const signedUp = r['Players signed up'];
+            const lastChamp = r['Players at last set champ'];
+            const postcode = r['Postcode'];
+            const price = r['Price'];
+            const location = postcode || r['Location'] || '';
+
+            const links = [];
+            if (routeLink) links.push(`<a class="link-icon" href="${esc(routeLink)}" target="_blank" rel="noopener" title="Directions">🗺️</a>`);
+            if (eventLink) links.push(`<a class="link-icon" href="${esc(eventLink)}" target="_blank" rel="noopener" title="Event page">🔗</a>`);
+            if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
+
+            const naVal = v => (v && v !== 'N/A') ? esc(v) : '<span class="badge-na">—</span>';
+
+            return `<div class="card">
+                <div class="card-header">
+                    <span class="card-venue">${esc(r['Venue']) || '—'}</span>
+                </div>
+                ${location ? `<div class="card-row"><span class="card-label">Location</span><span class="muted" style="font-size:0.82rem">${esc(location)}</span></div>` : ''}
+                <div class="card-row"><span class="card-label">Drive Time</span><span>${esc(travel)}</span></div>
+                <div class="card-row"><span class="card-label">Signed up</span><span>${naVal(signedUp)}</span></div>
+                <div class="card-row"><span class="card-label">Last Attendance</span><span>${naVal(lastChamp)}</span></div>
+                ${price ? `<div class="card-row"><span class="card-label">Price</span><span>${esc(price)}</span></div>` : ''}
+                ${links.length ? `<div class="card-links">${links.join(' ')}</div>` : ''}
+            </div>`;
+        }
+
+        const COLS = [
+            { key: 'venue', label: 'Venue' },
+            { key: 'location', label: 'Location' },
+            { key: 'signed_up', label: 'Signed up', numeric: true },
+            { key: 'last_champ', label: 'Last Attendance', numeric: true },
+            { key: 'price', label: 'Price', nosort: true },
+            { key: 'travel', label: 'Drive Time' },
+            { key: 'links', label: 'Links', nosort: true },
+        ];
+
+
+        function buildTableHeader() {
+            const colgroup = `<colgroup>
+                <col><!-- Venue: auto -->
+                <col style="width:90px">
+                <col style="width:80px">
+                <col style="width:130px">
+                <col style="width:65px">
+                <col style="width:90px">
+                <col style="width:75px">
+            </colgroup>`;
+            const ths = COLS.map(c => {
+                const alignStyle = c.numeric ? ' style="text-align:right"' : '';
+                const cls = !c.nosort && sortCol === c.key
+                    ? ` class="${sortDir === 1 ? 'sort-asc' : 'sort-desc'}"`
+                    : '';
+                return `<th${alignStyle}${cls} style="cursor:default">${esc(c.label)}</th>`;
+            }).join('');
+            return colgroup + `<thead><tr>${ths}</tr></thead>`;
+        }
+
+        function sortRows(rows) {
+            if (!sortCol) return rows;
+            return [...rows].sort((a, b) => {
+                let av, bv;
+                if (sortCol === 'travel') {
+                    av = travelToSeconds(a['Travel time']);
+                    bv = travelToSeconds(b['Travel time']);
+                } else if (sortCol === 'signed_up') {
+                    av = parseInt(a['Players signed up']) || 0;
+                    bv = parseInt(b['Players signed up']) || 0;
+                } else if (sortCol === 'last_champ') {
+                    av = parseInt(a['Players at last set champ']) || 0;
+                    bv = parseInt(b['Players at last set champ']) || 0;
+                } else if (sortCol === 'venue') {
+                    av = (a['Venue'] || '').toLowerCase();
+                    bv = (b['Venue'] || '').toLowerCase();
+                } else if (sortCol === 'location') {
+                    av = (a['Postcode'] || a['Location'] || '').toLowerCase();
+                    bv = (b['Postcode'] || b['Location'] || '').toLowerCase();
+                }
+                if (av < bv) return -sortDir;
+                if (av > bv) return sortDir;
+                return 0;
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  New competitions (filtered by days since Created)
+        // ═══════════════════════════════════════════════════════════
+        function renderDayNav(dates) {
+            const nav = document.getElementById('day-nav');
+            if (!dates.length) {
+                nav.style.display = 'none';
+                nav.innerHTML = '';
+                return;
+            }
+            const options = dates.map((date, idx) =>
+                `<option value="day-${idx}">${esc(formatDate(date))}</option>`
+            ).join('');
+            nav.innerHTML = `<div class="day-nav-inner"><span class="day-nav-label">Jump to day:</span><select id="day-nav-select" class="day-nav-select"><option value="">Select a date...</option><option value="recent-section">New competitions</option>${options}</select></div>`;
+            const sel = document.getElementById('day-nav-select');
+            sel.addEventListener('change', e => {
+                if (!e.target.value) return;
+                const target = document.getElementById(e.target.value);
+                if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+            nav.style.display = '';
+        }
+
+        function renderRecentEvents(rows) {
+            const section = document.getElementById('recent-section');
+            const container = document.getElementById('recent-container');
+            const countEl = document.getElementById('recent-count');
+            const toggleBtn = document.getElementById('recent-toggle-btn');
+            // Only show the section at all if the CSV has Created data
+            const hasCreated = rows.some(r => r['Created']);
+            if (!hasCreated) { section.style.display = 'none'; return; }
+            section.style.display = 'block';
+            const days = parseInt(document.getElementById('new-days-select').value) || 1;
+            const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+            const recent = rows
+                .filter(r => r['Created'] && new Date(r['Created']) >= cutoff)
+                .sort((a, b) => new Date(b['Created']) - new Date(a['Created']));
+            countEl.textContent = `(${recent.length})`;
+            toggleBtn.textContent = recentCollapsed ? 'Show' : 'Hide';
+            if (recentCollapsed) {
+                container.style.display = 'none';
+                return;
+            }
+            container.style.display = '';
+            if (!recent.length) {
+                container.innerHTML = `<p style="padding:1rem 0;color:#94a3b8;font-style:italic">No competitions added in the last ${days} day(s).</p>`;
+                return;
+            }
+            if (viewMode === 'card') {
+                const cards = recent.map(r => {
+                    const travel = r['Travel time'] || 'N/A';
+                    const routeLink = r['Route link'];
+                    const eventLink = r['Event link'];
+                    const lastChampLink = r['Last set champ link'];
+                    const signedUp = r['Players signed up'];
+                    const lastChamp = r['Players at last set champ'];
+                    const postcode = r['Postcode'];
+                    const price = r['Price'];
+                    const location = postcode || r['Location'] || '';
+                    const links = [];
+                    if (routeLink) links.push(`<a class="link-icon" href="${esc(routeLink)}" target="_blank" rel="noopener" title="Directions">🗺️</a>`);
+                    if (eventLink) links.push(`<a class="link-icon" href="${esc(eventLink)}" target="_blank" rel="noopener" title="Event page">🔗</a>`);
+                    if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
+                    const naVal = v => (v && v !== 'N/A') ? esc(v) : '<span class="badge-na">—</span>';
+                    return `<div class="card">
+                        <div class="card-header">
+                            <span class="card-venue">${esc(r['Venue']) || '—'}</span>
+                        </div>
+                        <div class="card-row"><span class="card-label">Date</span><span style="font-size:0.82rem">${esc(formatDate(r['Date']))}</span></div>
+                        ${location ? `<div class="card-row"><span class="card-label">Location</span><span class="muted" style="font-size:0.82rem">${esc(location)}</span></div>` : ''}
+                        <div class="card-row"><span class="card-label">Drive Time</span><span>${esc(travel)}</span></div>
+                        <div class="card-row"><span class="card-label">Signed up</span><span>${naVal(signedUp)}</span></div>
+                        <div class="card-row"><span class="card-label">Last Attendance</span><span>${naVal(lastChamp)}</span></div>
+                        ${price ? `<div class="card-row"><span class="card-label">Price</span><span>${esc(price)}</span></div>` : ''}
+                        ${links.length ? `<div class="card-links">${links.join(' ')}</div>` : ''}
+                    </div>`;
+                }).join('');
+                container.innerHTML = `<div class="cards-grid">${cards}</div>`;
+            } else {
+                const dateColgroup = `<colgroup><col style="width:80px"><col><col style="width:90px"><col style="width:80px"><col style="width:130px"><col style="width:65px"><col style="width:90px"><col style="width:75px"></colgroup>`;
+                const dateThs = ['Date', ...COLS.map(c => c.label)].map((lbl, i) => {
+                    const align = (i === 3 || i === 4) ? ' style="text-align:right;cursor:default;color:#94a3b8"' : ' style="cursor:default;color:#94a3b8"';
+                    return `<th${align}>${esc(lbl)}</th>`;
+                }).join('');
+                const dateRows = recent.map(r => {
+                    const travel = r['Travel time'] || 'N/A';
+                    const routeLink = r['Route link'];
+                    const eventLink = r['Event link'];
+                    const lastChampLink = r['Last set champ link'];
+                    const signedUp = r['Players signed up'];
+                    const lastChamp = r['Players at last set champ'];
+                    const postcode = r['Postcode'];
+                    const price = r['Price'];
+                    const links = [];
+                    if (routeLink) links.push(`<a class="link-icon" href="${esc(routeLink)}" target="_blank" rel="noopener" title="Directions">🗺️</a>`);
+                    if (eventLink) links.push(`<a class="link-icon" href="${esc(eventLink)}" target="_blank" rel="noopener" title="Event page">🔗</a>`);
+                    if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
+                    return `<tr>
+                        <td class="muted" style="font-size:0.82rem;white-space:nowrap">${esc(r['Date'])}</td>
+                        <td style="font-weight:500">${esc(r['Venue']) || '—'}</td>
+                        <td class="muted" style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r['Location'])}">${esc(postcode) || esc(r['Location']) || '—'}</td>
+                        <td class="numeric">${signedUp !== '' && signedUp !== 'N/A' ? esc(signedUp) : '<span class="badge-na">—</span>'}</td>
+                        <td class="numeric">${lastChamp !== '' && lastChamp !== 'N/A' ? esc(lastChamp) : '<span class="badge-na">—</span>'}</td>
+                        <td>${price ? esc(price) : '<span class="badge-na">—</span>'}</td>
+                        <td>${esc(travel)}</td>
+                        <td style="white-space:nowrap">${links.join(' ')}</td>
+                    </tr>`;
+                }).join('');
+                container.innerHTML = `<div class="table-wrap"><table style="min-width:720px">${dateColgroup}<thead><tr>${dateThs}</tr></thead><tbody>${dateRows}</tbody></table></div>`;
+            }
+            section.style.display = 'block';
+        }
+
+        function renderTable() {
+            renderRecentEvents(allRows);
+            let rows = allRows;
+
+            // Filter
+            if (filterText) {
+                const f = filterText.toLowerCase();
+                rows = rows.filter(r =>
+                    (r['Venue'] || '').toLowerCase().includes(f) ||
+                    (r['Location'] || '').toLowerCase().includes(f)
+                );
+            }
+
+            const container = document.getElementById('days-container');
+            const countEl = document.getElementById('event-count');
+            countEl.textContent = `${rows.length} event${rows.length !== 1 ? 's' : ''}`;
+
+            if (!rows.length) {
+                renderDayNav([]);
+                container.innerHTML = `<p style="padding:2rem;text-align:center;color:#94a3b8;font-style:italic">No events match your filter</p>`;
+                return;
+            }
+
+            // Group rows by date, preserving CSV order
+            const groups = new Map();
+            rows.forEach(r => {
+                const date = r['Date'] || '';
+                if (!groups.has(date)) groups.set(date, []);
+                groups.get(date).push(r);
+            });
+            const dayDates = Array.from(groups.keys());
+            renderDayNav(dayDates);
+
+            const html = [];
+            for (const [idx, [date, dayRows]] of Array.from(groups.entries()).entries()) {
+                const sorted = sortRows(dayRows);
+                if (viewMode === 'card') {
+                    html.push(`<div id="day-${idx}" class="day-group">
+                        <h3 class="day-heading">${esc(formatDate(date))}</h3>
+                        <div class="cards-grid">${sorted.map(renderCard).join('')}</div>
+                    </div>`);
+                } else {
+                    html.push(`<div id="day-${idx}" class="day-group">
+                        <h3 class="day-heading">${esc(formatDate(date))}</h3>
+                        <div class="table-wrap">
+                            <table style="min-width:720px">${buildTableHeader()}<tbody>
+                                ${sorted.map(renderRow).join('')}
+                            </tbody></table>
+                        </div>
+                    </div>`);
+                }
+            }
+            container.innerHTML = html.join('');
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Cat fact
+        // ═══════════════════════════════════════════════════════════
+        async function loadCatFact(force = false) {
+            const prefs = loadPrefs();
+            const now = Date.now();
+            if (!force && prefs.catFact && prefs.catFactExpiry && now < prefs.catFactExpiry) {
+                renderCatFact(prefs.catFact);
+                return;
+            }
+            document.getElementById('cat-fact-text').textContent = 'Fetching a cat fact…';
+            document.getElementById('cat-fact-section').style.display = '';
+            try {
+                const resp = await fetch('https://catfact.ninja/fact');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const data = await resp.json();
+                savePrefs({ catFact: data.fact, catFactExpiry: now + 60 * 60 * 1000 });
+                renderCatFact(data.fact);
+            } catch {
+                const fallback = loadPrefs().catFact;
+                document.getElementById('cat-fact-text').textContent =
+                    fallback || 'Could not load a cat fact right now.';
+            }
+        }
+
+        function renderCatFact(fact) {
+            document.getElementById('cat-fact-text').textContent = fact;
+            document.getElementById('cat-fact-section').style.display = '';
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Venue filter
+        // ═══════════════════════════════════════════════════════════
+        document.getElementById('venue-filter').addEventListener('input', e => {
+            filterText = e.target.value.trim();
+            renderTable();
+        });
+
+        document.getElementById('sort-select').addEventListener('change', e => {
+            const parts = e.target.value.split(':');
+            sortCol = parts[0];
+            sortDir = parseInt(parts[1]);
+            savePrefs({ sort: e.target.value });
+            renderTable();
+        });
+
+        document.getElementById('new-days-select').addEventListener('change', e => {
+            savePrefs({ days: e.target.value });
+            renderRecentEvents(allRows);
+        });
+
+        document.getElementById('recent-toggle-btn').addEventListener('click', () => {
+            recentCollapsed = !recentCollapsed;
+            savePrefs({ recentCollapsed });
+            renderRecentEvents(allRows);
+        });
+
+        function setView(mode) {
+            viewMode = mode;
+            savePrefs({ view: mode });
+            document.getElementById('btn-table-view').classList.toggle('active', mode === 'table');
+            document.getElementById('btn-card-view').classList.toggle('active', mode === 'card');
+            if (allRows.length) renderTable();
+        }
+
+        document.getElementById('btn-table-view').addEventListener('click', () => setView('table'));
+        document.getElementById('btn-card-view').addEventListener('click', () => setView('card'));
+        document.getElementById('cat-fact-btn').addEventListener('click', () => loadCatFact(true));
+
+        // ═══════════════════════════════════════════════════════════
+        //  Screen transitions
+        // ═══════════════════════════════════════════════════════════
+        function showEntry() {
+            document.getElementById('entry-screen').style.display = '';
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('results-screen').style.display = 'none';
+        }
+
+        function showLoading() {
+            document.getElementById('entry-screen').style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('results-screen').style.display = 'none';
+        }
+
+        function showResults() {
+            document.getElementById('entry-screen').style.display = 'none';
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('results-screen').style.display = 'block';
+        }
+
+        function showEntryError(msg) {
+            const el = document.getElementById('entry-error');
+            el.textContent = msg;
+            el.style.display = '';
+        }
+
+        function clearEntryError() {
+            document.getElementById('entry-error').style.display = 'none';
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Manifest — populate the postcode dropdown
+        // ═══════════════════════════════════════════════════════════
+        async function loadManifest(preselectPostcode) {
+            const sel = document.getElementById('postcode-select');
+            try {
+                const resp = await fetch('postcodes.json');
+                if (!resp.ok) throw new Error();
+                const postcodes = await resp.json(); // array of strings like ["MK6_3LP", ...]
+                sel.innerHTML = postcodes.map(p => {
+                    const display = p.replace('_', ' ');
+                    return `<option value="${p}">${display}</option>`;
+                }).join('');
+                if (preselectPostcode) {
+                    // Match against both spaced and underscored forms
+                    const target = preselectPostcode.replace(/\s+/g, '_').toUpperCase();
+                    const match = [...sel.options].find(o => o.value === target);
+                    if (match) {
+                        sel.value = match.value;
+                        loadEventData(match.value.replace('_', ' '));
+                        return;
+                    }
+                }
+            } catch {
+                sel.innerHTML = '<option value="">No postcodes available</option>';
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Form submission
+        // ═══════════════════════════════════════════════════════════
+        document.getElementById('postcode-form').addEventListener('submit', e => {
+            e.preventDefault();
+            const val = document.getElementById('postcode-select').value;
+            if (!val) return;
+            clearEntryError();
+            loadEventData(val.replace('_', ' '));
+        });
+
+        document.getElementById('change-postcode-btn').addEventListener('click', () => {
+            const url = new URL(window.location);
+            url.searchParams.delete('postcode');
+            window.history.replaceState({}, '', url);
+            showEntry();
+        });
+
+        // ═══════════════════════════════════════════════════════════
+        //  URL parameter bootstrap — skip entry screen if ?postcode=
+        // ═══════════════════════════════════════════════════════════
+        (function init() {
+            const params = new URLSearchParams(window.location.search);
+            const pc = params.get('postcode');
+            const prefs = loadPrefs();
+
+            // View: stored pref → device detection fallback
+            const defaultView = window.matchMedia('(max-width: 1024px)').matches ? 'card' : 'table';
+            setView(prefs.view || defaultView);
+
+            // Sort: stored pref → default 'travel:1'
+            const sortVal = prefs.sort || 'travel:1';
+            document.getElementById('sort-select').value = sortVal;
+            const [col, dir] = sortVal.split(':');
+            sortCol = col; sortDir = parseInt(dir);
+
+            // Days: stored pref → default '1'
+            document.getElementById('new-days-select').value = prefs.days || '1';
+
+            // New competitions collapsed state
+            recentCollapsed = !!prefs.recentCollapsed;
+
+            loadManifest(pc || null);
+            loadCatFact();
+        })();
+    </script>
+</body>
+
+</html>
