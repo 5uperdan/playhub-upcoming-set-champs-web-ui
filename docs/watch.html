@@ -1,0 +1,1281 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Watch Event — Set Championships</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+
+    <header>
+        <h1 id="header-title">🎴 Watch Event</h1>
+        <a href="index.html">← Upcoming events</a>
+    </header>
+
+    <!-- Event entry screen (no ID in URL) -->
+    <div id="entry-screen" style="display:none">
+        <div class="hero" style="margin-top:3rem">
+            <h2>Watch an event</h2>
+            <p>Paste a Play Hub event URL or enter an event ID to watch live standings.</p>
+        </div>
+        <form id="entry-form" style="display:flex;gap:0.5rem;width:100%;max-width:480px;margin:1.5rem auto 0">
+            <input id="entry-url-input" type="text" placeholder="https://tcg.ravensburgerplay.com/events/12345"
+                autocomplete="off"
+                style="flex:1;padding:0.625rem 0.875rem;border:1px solid #cbd5e1;border-radius:6px;font:inherit;font-size:0.95rem;outline:none;transition:border-color 0.15s">
+            <button type="submit" class="btn-primary">Watch</button>
+        </form>
+        <div id="entry-error" class="error-msg" style="display:none;margin:0.75rem auto 0;max-width:480px"></div>
+    </div>
+
+    <!-- Loading -->
+    <div id="loading" style="display:none">
+        <div class="spinner"></div>
+        <p id="loading-msg">Loading event…</p>
+    </div>
+
+    <!-- Error -->
+    <div id="error-screen" class="error-screen" style="display:none">
+        <p id="error-msg">Something went wrong.</p>
+        <a href="#" id="error-try-another">Try another event</a>
+    </div>
+
+    <!-- App -->
+    <div id="app" style="display:none">
+
+        <div class="event-info-bar">
+            <span id="event-status-text"></span>
+            <a id="event-ph-link" href="#" target="_blank" rel="noopener">View on Play Hub ↗</a>
+            <button class="mini-btn" id="change-event-btn" style="margin-left:auto">Change event</button>
+        </div>
+
+        <div class="content-wrap">
+
+            <!-- Status / refresh bar -->
+            <div class="status-bar" id="status-bar">
+                <span id="last-updated-text"></span>
+                <button class="refresh-btn" id="refresh-btn">↻ Refresh now</button>
+                <div class="countdown-wrap" id="countdown-wrap" style="display:none">
+                    <span id="countdown-label">Next refresh in <span id="countdown-secs">–</span>s</span>
+                    <div class="countdown-track">
+                        <div class="countdown-fill" id="countdown-fill" style="width:100%"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Standings -->
+            <div id="standings-section">
+                <div class="section-header">
+                    <h2>Standings</h2>
+                    <span class="section-note" id="standings-note"></span>
+                </div>
+                <div class="table-wrap">
+                    <div id="standings-container">
+                        <!-- rendered by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Route panel (shown below standings when route btn clicked) -->
+            <div id="route-panel" style="display:none"></div>
+
+            <!-- Latest round matches -->
+            <div id="rounds-section" style="margin-top:1.5rem;display:none">
+                <div class="section-header">
+                    <h2 id="rounds-section-title">Current Round</h2>
+                </div>
+                <div class="table-wrap">
+                    <div id="rounds-container"></div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════════════
+        //  Constants
+        // ═══════════════════════════════════════════════════════════
+        const API_BASE = 'https://api.cloudflare.ravensburgerplay.com/hydraproxy/api/v2';
+        const CORS_PROXY = 'https://corsproxy.io/?url=';
+        const POLL_MIN_MS = 30_000;
+        const POLL_MAX_MS = 90_000;
+
+        // ═══════════════════════════════════════════════════════════
+        //  State
+        // ═══════════════════════════════════════════════════════════
+        let eventId = null;
+        let eventData = null;          // raw API event object
+        let rounds = [];               // [{id, name, index, isSwiss}] all rounds from phases
+        let matchesByRound = {};       // roundId → [parsed match objects]
+        let playerNames = {};          // ph_user_id → display name
+        let allPlayerIds = [];         // all unique ph_user_ids seen in any match
+        let registrationCount = 0;     // starting player count from event / registrations
+
+        let isEventComplete = false;
+        let activeRoutePlayerId = null;
+
+        let pollTimer = null;
+        let nextPollAt = null;
+        let pollIntervalMs = 60_000;
+        let countdownInterval = null;
+        let isRefreshing = false;
+
+        // ═══════════════════════════════════════════════════════════
+        //  API helpers
+        // ═══════════════════════════════════════════════════════════
+        async function phFetch(path) {
+            const url = CORS_PROXY + encodeURIComponent(API_BASE + path);
+            const res = await fetch(url, {
+                headers: { 'x-game-slug': 'disney-lorcana', 'Cache-Control': 'no-cache' },
+                cache: 'no-store'
+            });
+            if (!res.ok) throw new Error(`API error ${res.status} for ${path}`);
+            return res.json();
+        }
+
+        async function apiFetchEvent() {
+            return phFetch(`/events/${eventId}/`);
+        }
+
+        async function apiFetchRegistrations() {
+            let page = 1;
+            const all = [];
+            while (true) {
+                const data = await phFetch(`/events/${eventId}/registrations/?page_size=100&page=${page}`);
+                const results = data.results ?? [];
+                all.push(...results);
+                if (!data.next_page_number) break;
+                page = data.next_page_number;
+            }
+            return all;
+        }
+
+        async function apiFetchRoundMatches(roundId) {
+            // Try the non-paginated endpoint first (most common), fall back to paginated
+            try {
+                const data = await phFetch(`/tournament-rounds/${roundId}/matches/`);
+                if (data.matches) return data.matches;
+            } catch (_) { /* fall through */ }
+            try {
+                const data = await phFetch(`/tournament-rounds/${roundId}/matches/paginated/`);
+                if (data.results) return data.results;
+            } catch (_) { /* fall through */ }
+            return [];
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Parse round list from event tournament_phases
+        // ═══════════════════════════════════════════════════════════
+        function parseRoundsFromEvent(event) {
+            const result = [];
+            let idx = 0;
+            for (const phase of (event.tournament_phases ?? [])) {
+                const isSwiss = phase.round_type === 'SWISS';
+                const phaseRounds = [...(phase.rounds ?? [])].sort((a, b) => a.round_number - b.round_number);
+
+                if (isSwiss) {
+                    for (const rnd of phaseRounds) {
+                        result.push({ id: rnd.id, name: `Round ${rnd.round_number}`, index: idx++, isSwiss: true });
+                    }
+                } else {
+                    // Elimination: label rounds "Top N" counting down
+                    let remaining = phase.rank_required_to_enter_phase ?? Math.pow(2, phaseRounds.length);
+                    for (const rnd of phaseRounds) {
+                        const label = remaining > 1 ? `Top ${remaining}` : 'Final';
+                        result.push({ id: rnd.id, name: label, index: idx++, isSwiss: false });
+                        remaining = Math.floor(remaining / 2);
+                    }
+                }
+            }
+            return result;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Parse a raw API match record into our internal format
+        // ═══════════════════════════════════════════════════════════
+        function parseMatchRecord(apiMatch, round) {
+            const rels = [...(apiMatch.player_match_relationships ?? [])]
+                .sort((a, b) => (a.player_order ?? 0) - (b.player_order ?? 0));
+
+            const isBye = !!(apiMatch.match_is_bye) || rels.length < 2;
+
+            let playerAId = null, playerBId = null;
+            let playerAName = 'Unknown', playerBName = 'Unknown';
+
+            if (rels.length >= 1) {
+                playerAId = rels[0].player?.id ?? null;
+                playerAName = rels[0].user_event_status?.best_identifier
+                    ?? rels[0].player?.best_identifier ?? 'Unknown';
+            }
+            if (rels.length >= 2) {
+                playerBId = rels[1].player?.id ?? null;
+                playerBName = rels[1].user_event_status?.best_identifier
+                    ?? rels[1].player?.best_identifier ?? 'Unknown';
+            }
+
+            const isDraw = !!(apiMatch.match_is_intentional_draw || apiMatch.match_is_unintentional_draw);
+            const winnerRaw = apiMatch.winning_player ?? null;
+            const winsRaw = apiMatch.games_won_by_winner ?? 0;
+            const lossesRaw = apiMatch.games_won_by_loser ?? 0;
+
+            let playerAScore, playerBScore, winnerId;
+            if (winnerRaw != null && winnerRaw === playerAId) {
+                playerAScore = winsRaw; playerBScore = lossesRaw; winnerId = playerAId;
+            } else if (winnerRaw != null && winnerRaw === playerBId) {
+                playerAScore = lossesRaw; playerBScore = winsRaw; winnerId = playerBId;
+            } else {
+                playerAScore = winsRaw; playerBScore = lossesRaw; winnerId = null;
+            }
+
+            const isFinished = winnerRaw != null || isDraw;
+
+            // Update global player name map
+            if (playerAId != null) playerNames[playerAId] = playerAName;
+            if (playerBId != null) playerNames[playerBId] = playerBName;
+
+            return {
+                playerAId, playerBId, playerAName, playerBName,
+                playerAScore, playerBScore, winnerId,
+                isDraw, isFinished, isBye,
+                tableNumber: apiMatch.table_number ?? null,
+                roundId: round.id, roundName: round.name, roundIndex: round.index, isSwiss: round.isSwiss
+            };
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Collect all matches from current state
+        // ═══════════════════════════════════════════════════════════
+        function getAllMatches() {
+            const all = [];
+            for (const rnd of rounds) {
+                for (const m of (matchesByRound[rnd.id] ?? [])) all.push(m);
+            }
+            return all;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Compute standings from a match list
+        //  playerIds: array of ph_user_ids to include in output
+        //  playerNamesMap: ph_user_id → name
+        // ═══════════════════════════════════════════════════════════
+        function computeStandings(matches, playerIds, playerNamesMap) {
+            // Only Swiss matches matter for standings
+            const swissFinished = matches.filter(m => m.isSwiss && m.isFinished && !m.isBye);
+            const swissByeFinished = matches.filter(m => m.isSwiss && m.isFinished && m.isBye);
+
+            const stats = {};
+            for (const pid of playerIds) {
+                stats[pid] = {
+                    wins: 0, losses: 0, draws: 0,
+                    matchesPlayed: 0,
+                    gamesWon: 0, gamesPlayed: 0,
+                    opponents: []
+                };
+            }
+
+            // Byes: count as a win but don't record an opponent
+            for (const m of swissByeFinished) {
+                const pid = m.playerAId;
+                const s = stats[pid];
+                if (!s) continue;
+                s.wins++;
+                s.matchesPlayed++;
+                s.gamesWon += (m.playerAScore > 0 ? m.playerAScore : 2);
+                s.gamesPlayed += (m.playerAScore > 0 ? m.playerAScore : 2);
+            }
+
+            // Regular finished matches
+            for (const m of swissFinished) {
+                const sa = stats[m.playerAId];
+                const sb = m.playerBId != null ? stats[m.playerBId] : null;
+                if (!sa || !sb) continue;
+
+                sa.matchesPlayed++;
+                sb.matchesPlayed++;
+                sa.gamesWon += m.playerAScore;
+                sb.gamesWon += m.playerBScore;
+                sa.gamesPlayed += m.playerAScore + m.playerBScore;
+                sb.gamesPlayed += m.playerAScore + m.playerBScore;
+                sa.opponents.push(m.playerBId);
+                sb.opponents.push(m.playerAId);
+
+                if (m.isDraw) {
+                    sa.draws++; sb.draws++;
+                } else if (m.winnerId === m.playerAId) {
+                    sa.wins++; sb.losses++;
+                } else if (m.winnerId === m.playerBId) {
+                    sb.wins++; sa.losses++;
+                }
+            }
+
+            // Match win percentage (for OMW calculation)
+            // Floor at 1/3 per WotC/Lorcana tournament rules
+            const mwp = {};
+            for (const pid of playerIds) {
+                const s = stats[pid];
+                mwp[pid] = s.matchesPlayed === 0
+                    ? 1 / 3
+                    : Math.max(1 / 3, s.wins / s.matchesPlayed);
+            }
+
+            // Game win percentage (floor at 1/3)
+            const gwp = {};
+            for (const pid of playerIds) {
+                const s = stats[pid];
+                gwp[pid] = s.gamesPlayed === 0
+                    ? 1 / 3
+                    : Math.max(1 / 3, s.gamesWon / s.gamesPlayed);
+            }
+
+            // Build final standing objects
+            const standings = [];
+            for (const pid of playerIds) {
+                const s = stats[pid];
+
+                // OMW%: average MWP of all non-bye opponents (each floored at 1/3), then floor avg at 1/3
+                let omw = 1 / 3;
+                if (s.opponents.length > 0) {
+                    const oppMwps = s.opponents.map(oid => Math.max(1 / 3, mwp[oid] ?? 1 / 3));
+                    omw = Math.max(1 / 3, oppMwps.reduce((a, b) => a + b, 0) / oppMwps.length);
+                }
+
+                // OGW%: average GWP of all non-bye opponents (each floored at 1/3), then floor avg at 1/3
+                let ogw = 1 / 3;
+                if (s.opponents.length > 0) {
+                    const oppGwps = s.opponents.map(oid => Math.max(1 / 3, gwp[oid] ?? 1 / 3));
+                    ogw = Math.max(1 / 3, oppGwps.reduce((a, b) => a + b, 0) / oppGwps.length);
+                }
+
+                standings.push({
+                    playerId: pid,
+                    name: playerNamesMap[pid] ?? 'Unknown',
+                    points: s.wins * 3 + s.draws,
+                    wins: s.wins,
+                    losses: s.losses,
+                    draws: s.draws,
+                    matchesPlayed: s.matchesPlayed,
+                    gamesWon: s.gamesWon,
+                    gamesPlayed: s.gamesPlayed,
+                    omw,
+                    gw: gwp[pid],
+                    ogw
+                });
+            }
+            return standings;
+        }
+
+        function sortStandings(standings) {
+            standings.sort((a, b) => {
+                if (b.points !== a.points) return b.points - a.points;
+                if (Math.abs(b.omw - a.omw) > 1e-9) return b.omw - a.omw;
+                if (Math.abs(b.gw - a.gw) > 1e-9) return b.gw - a.gw;
+                if (Math.abs(b.ogw - a.ogw) > 1e-9) return b.ogw - a.ogw;
+                return a.name.localeCompare(b.name);
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Top cut size from player count
+        // ═══════════════════════════════════════════════════════════
+        function topCutSize(playerCount) {
+            if (playerCount <= 8) return 0;
+            if (playerCount <= 16) return 4;
+            return 8;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Determine the latest Swiss round that has any matches
+        // ═══════════════════════════════════════════════════════════
+        function latestSwissRoundInfo() {
+            let result = null;
+            for (const rnd of rounds) {
+                if (!rnd.isSwiss) continue;
+                const ms = matchesByRound[rnd.id] ?? [];
+                if (ms.length > 0) result = rnd;
+            }
+            return result;   // null if no Swiss matches at all
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Compute final positions for a COMPLETE tournament
+        //  If there were elimination rounds, parse them for 1st/2nd/etc.
+        //  Otherwise fall back to ordinal Swiss standings.
+        // ═══════════════════════════════════════════════════════════
+        function computeFinalPositions(allMatches, swissStandings) {
+            const elimFinished = allMatches.filter(m => !m.isSwiss && m.isFinished && !m.isBye);
+
+            if (elimFinished.length === 0) {
+                // Pure Swiss: positions are ordinal standing positions
+                return swissStandings.map((s, i) => ({ playerId: s.playerId, pos: ordinal(i + 1) }));
+            }
+
+            // Group by round name
+            const byRound = {};
+            for (const m of elimFinished) {
+                if (!byRound[m.roundName]) byRound[m.roundName] = [];
+                byRound[m.roundName].push(m);
+            }
+
+            // Sort round names Top N descending (Top 8 first → Top 4 → Top 2)
+            const roundNames = Object.keys(byRound).sort((a, b) => {
+                const an = parseInt(a.match(/Top (\d+)/)?.[1] ?? '0', 10);
+                const bn = parseInt(b.match(/Top (\d+)/)?.[1] ?? '0', 10);
+                return bn - an;
+            });
+
+            const posMap = {};  // ph_user_id → position string
+
+            for (const rname of roundNames) {
+                const n = parseInt(rname.match(/Top (\d+)/)?.[1] ?? '0', 10);
+                for (const m of byRound[rname]) {
+                    const loserId = m.winnerId === m.playerAId ? m.playerBId : m.playerAId;
+                    if (n === 2) {
+                        if (m.winnerId != null) posMap[m.winnerId] = '1st';
+                        if (loserId != null) posMap[loserId] = '2nd';
+                    } else if (n > 2) {
+                        // Losers of Top N round earn =(N/2+1) place
+                        if (loserId != null) posMap[loserId] = `=${ordinal(n / 2 + 1)}`;
+                    }
+                }
+            }
+
+            // Map positions back to standings; players not in elimination get their Swiss rank
+            return swissStandings.map((s, i) => ({
+                playerId: s.playerId,
+                pos: posMap[s.playerId] ?? ordinal(i + 1)
+            }));
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Route to top cut: enumerate scenarios for unfinished matches
+        // ═══════════════════════════════════════════════════════════
+        function findRoutes(targetPlayerId, cutSize, maxRoutes = 3) {
+            const currentRnd = latestSwissRoundInfo();
+            if (!currentRnd) return { routes: [], unfinished: [], noRound: true };
+
+            const currentMatches = matchesByRound[currentRnd.id] ?? [];
+            const unfinished = currentMatches.filter(m => !m.isFinished && !m.isBye);
+
+            if (unfinished.length === 0) {
+                return { routes: [], unfinished: [], noUnfinished: true };
+            }
+
+            // Base: all finished matches (across all rounds)
+            const baseMatches = getAllMatches().filter(m => m.isFinished);
+
+            // Try without draws first; if no route found, try with draws
+            for (const includeDraws of [false, true]) {
+                const numOutcomes = includeDraws ? 3 : 2;
+                const total = Math.pow(numOutcomes, unfinished.length);
+                const routes = [];
+
+                for (let mask = 0; mask < total && routes.length < maxRoutes; mask++) {
+                    // Decode mask: index i uses digit (mask / numOutcomes^i) % numOutcomes
+                    // 0 = player A wins, 1 = player B wins, 2 = draw
+                    const matchOutcomes = unfinished.map((_, i) =>
+                        Math.floor(mask / Math.pow(numOutcomes, i)) % numOutcomes
+                    );
+
+                    // Build hypothetical match list
+                    const hypoMatches = [...baseMatches];
+                    for (let i = 0; i < unfinished.length; i++) {
+                        const m = unfinished[i];
+                        const outcome = matchOutcomes[i];
+                        let winnerId, isDraw, paScore, pbScore;
+                        if (outcome === 0) {
+                            winnerId = m.playerAId; isDraw = false; paScore = 2; pbScore = 0;
+                        } else if (outcome === 1) {
+                            winnerId = m.playerBId; isDraw = false; paScore = 0; pbScore = 2;
+                        } else {
+                            winnerId = null; isDraw = true; paScore = 1; pbScore = 1;
+                        }
+                        hypoMatches.push({
+                            ...m, winnerId, isDraw, isFinished: true,
+                            playerAScore: paScore, playerBScore: pbScore
+                        });
+                    }
+
+                    // Compute and sort standings from hypothetical matches
+                    const hypoStandings = computeStandings(hypoMatches, allPlayerIds, playerNames);
+                    sortStandings(hypoStandings);
+
+                    const targetIdx = hypoStandings.findIndex(s => s.playerId === targetPlayerId);
+                    if (cutSize > 0 && targetIdx >= 0 && targetIdx < cutSize) {
+                        routes.push({ matchOutcomes, unfinished: [...unfinished] });
+                    }
+                }
+
+                if (routes.length > 0) {
+                    return { routes, unfinished, includeDraws };
+                }
+            }
+
+            return { routes: [], unfinished };
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Rendering helpers
+        // ═══════════════════════════════════════════════════════════
+        function esc(str) {
+            return (str ?? '').toString()
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function pct(val) {
+            return (val * 100).toFixed(1) + '%';
+        }
+
+        function ordinal(n) {
+            const n100 = n % 100;
+            if (n100 >= 11 && n100 <= 13) return `${n}th`;
+            const suf = { 1: 'st', 2: 'nd', 3: 'rd' };
+            return `${n}${suf[n % 10] ?? 'th'}`;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Render standings table
+        // ═══════════════════════════════════════════════════════════
+        function renderStandings() {
+            const allMatches = getAllMatches();
+            const cut = topCutSize(registrationCount);
+
+            // Build standings from all completed Swiss match data
+            const standings = computeStandings(allMatches, allPlayerIds, playerNames);
+            sortStandings(standings);
+
+            // Determine current-round status per player
+            const currentRnd = latestSwissRoundInfo();
+            const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
+            const doneIds = new Set();
+            const playingIds = new Set();
+            for (const m of currentMatches) {
+                if (m.isBye) continue;
+                if (m.isFinished) {
+                    if (m.playerAId != null) doneIds.add(m.playerAId);
+                    if (m.playerBId != null) doneIds.add(m.playerBId);
+                } else {
+                    if (m.playerAId != null) playingIds.add(m.playerAId);
+                    if (m.playerBId != null) playingIds.add(m.playerBId);
+                }
+            }
+
+            // For a completed tournament, also compute final positions from elim rounds
+            let finalPositions = null;
+            if (isEventComplete) {
+                finalPositions = computeFinalPositions(allMatches, standings);
+            }
+
+            const hasUnfinished = currentMatches.some(m => !m.isFinished && !m.isBye);
+            const showRouteBtn = !isEventComplete && cut > 0;
+
+            // Determine how many total Swiss rounds exist
+            const totalSwissRounds = rounds.filter(r => r.isSwiss).length;
+            const currentRoundNum = currentRnd ? (rounds.indexOf(currentRnd) + 1) : 0;
+
+            // Update the note text
+            const noteEl = document.getElementById('standings-note');
+            if (isEventComplete) {
+                noteEl.textContent = 'Final results';
+            } else if (currentRnd) {
+                const statusPart = hasUnfinished ? 'in progress' : 'complete';
+                noteEl.textContent = `${currentRnd.name} ${statusPart} · ${totalSwissRounds} Swiss round${totalSwissRounds !== 1 ? 's' : ''}`;
+            } else {
+                noteEl.textContent = 'Waiting for first round…';
+            }
+
+            // Build table HTML
+            const colHdrs = [
+                `<th style="width:2.5rem;text-align:right">#</th>`,
+                `<th>Player</th>`,
+                `<th style="width:3.5rem;text-align:right">Pts</th>`,
+                `<th style="width:2.5rem;text-align:right" title="Wins">W</th>`,
+                `<th style="width:2.5rem;text-align:right" title="Losses">L</th>`,
+                `<th style="width:2.5rem;text-align:right" title="Draws">D</th>`,
+                `<th style="width:4.5rem;text-align:right" title="Opponent Match Win %">OMW%</th>`,
+                `<th style="width:3.5rem;text-align:right" title="Game Win %">GW%</th>`,
+                `<th style="width:4.5rem;text-align:right" title="Opponent Game Win %">OGW%</th>`,
+            ];
+            if (isEventComplete) {
+                colHdrs.push(`<th style="width:4rem;text-align:center">Position</th>`);
+            } else {
+                colHdrs.push(`<th style="width:3rem;text-align:center" title="Current round status">Rd</th>`);
+            }
+
+            const thead = `<thead><tr>${colHdrs.join('')}</tr></thead>`;
+
+            const rows = standings.map((s, idx) => {
+                const inCut = cut > 0 && idx < cut;
+                const isCutBorder = cut > 0 && idx === cut;  // first row outside top cut
+
+                // Rank cell
+                const rankCell = inCut
+                    ? `<td style="text-align:right;padding-right:0.5rem"><span class="in-cut-rank">${idx + 1}</span></td>`
+                    : `<td style="text-align:right;color:#94a3b8;font-size:0.82rem;padding-right:0.5rem">${idx + 1}</td>`;
+
+                // Player name + route button
+                const routeBtn = showRouteBtn
+                    ? ` <button class="route-btn${activeRoutePlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Route to top ${cut}">🎯</button>`
+                    : '';
+                const nameCell = `<td style="font-weight:500">${esc(s.name)}${routeBtn}</td>`;
+
+                // Round status
+                let roundStatusCell = '';
+                if (!isEventComplete) {
+                    let badge;
+                    if (doneIds.has(s.playerId) && !playingIds.has(s.playerId)) {
+                        badge = `<span class="round-badge done" title="Round complete">✓</span>`;
+                    } else if (playingIds.has(s.playerId)) {
+                        badge = `<span class="round-badge playing" title="Match in progress">⏳</span>`;
+                    } else {
+                        badge = `<span class="round-badge none" title="No match">–</span>`;
+                    }
+                    roundStatusCell = `<td style="text-align:center">${badge}</td>`;
+                }
+
+                // Final position cell (complete tournament only)
+                let finalPosCell = '';
+                if (isEventComplete && finalPositions) {
+                    const fp = finalPositions.find(f => f.playerId === s.playerId);
+                    const pos = fp?.pos;
+                    let cls = 'pos-other';
+                    if (pos === '1st') cls = 'pos-1st';
+                    else if (pos === '2nd') cls = 'pos-2nd';
+                    else if (pos === '=3rd' || pos === '3rd') cls = 'pos-3rd';
+                    finalPosCell = `<td style="text-align:center"><span class="pos-badge ${cls}">${esc(pos ?? '—')}</span></td>`;
+                }
+
+                const cutClass = isCutBorder ? ' class="cut-divider"' : '';
+
+                return `<tr${cutClass}>${rankCell}${nameCell}
+                <td style="text-align:right;font-weight:600">${s.points}</td>
+                <td style="text-align:right;color:#166534">${s.wins}</td>
+                <td style="text-align:right;color:#991b1b">${s.losses}</td>
+                <td style="text-align:right;color:#92400e">${s.draws}</td>
+                <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.omw)}</td>
+                <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.gw)}</td>
+                <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.ogw)}</td>
+                ${isEventComplete ? finalPosCell : roundStatusCell}
+            </tr>`;
+            }).join('');
+
+            // Cut legend note
+            let cutLegend = '';
+            if (!isEventComplete && cut > 0) {
+                cutLegend = `<div class="ko-note">
+                The amber line marks the top ${cut} cut. Players above the line advance to knockout rounds.
+                <strong>▶</strong> rank = currently within top cut.
+            </div>`;
+            }
+
+            document.getElementById('standings-container').innerHTML =
+                `<table id="standings-table">${thead}<tbody>${rows}</tbody></table>${cutLegend}`;
+
+            // Wire up route buttons
+            document.querySelectorAll('.route-btn[data-player-id]').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const pid = parseInt(btn.dataset.playerId, 10);
+                    toggleRoutePanel(pid, standings, cut);
+                });
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Render latest round matches
+        // ═══════════════════════════════════════════════════════════
+        function renderLatestRoundMatches() {
+            const section = document.getElementById('rounds-section');
+            const container = document.getElementById('rounds-container');
+            const titleEl = document.getElementById('rounds-section-title');
+
+            // Find the most recent round with any matches (Swiss or elim)
+            let displayRound = null;
+            for (const rnd of rounds) {
+                if ((matchesByRound[rnd.id] ?? []).length > 0) displayRound = rnd;
+            }
+
+            if (!displayRound) {
+                section.style.display = 'none';
+                return;
+            }
+
+            const matches = matchesByRound[displayRound.id] ?? [];
+            const nonBye = matches.filter(m => !m.isBye);
+
+            if (nonBye.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            titleEl.textContent = displayRound.name;
+            section.style.display = '';
+
+            const rows = nonBye
+                .slice()
+                .sort((a, b) => (a.tableNumber ?? 999) - (b.tableNumber ?? 999))
+                .map(m => {
+                    // Prefer the registration-sourced name map; fall back to the name stored on the match
+                    const aName = (m.playerAId != null ? playerNames[m.playerAId] : null) ?? m.playerAName;
+                    const bName = (m.playerBId != null ? playerNames[m.playerBId] : null) ?? m.playerBName;
+                    const tableCell = m.tableNumber != null
+                        ? `<td style="text-align:right;color:#94a3b8;font-size:0.78rem;padding-right:0.5rem">${m.tableNumber}</td>`
+                        : `<td></td>`;
+                    let resultHtml;
+                    if (!m.isFinished) {
+                        resultHtml = `
+                        <td style="text-align:right">${esc(aName)}</td>
+                        <td style="text-align:center;color:#92400e;font-style:italic;font-size:0.78rem">playing</td>
+                        <td style="text-align:left">${esc(bName)}</td>`;
+                    } else if (m.isDraw) {
+                        resultHtml = `
+                        <td style="text-align:right">${esc(aName)}</td>
+                        <td style="text-align:center;white-space:nowrap;font-family:monospace;color:#64748b">${m.playerAScore} – ${m.playerBScore}</td>
+                        <td style="text-align:left">${esc(bName)}</td>`;
+                    } else {
+                        const aWon = m.winnerId === m.playerAId;
+                        const aStyle = aWon ? 'font-weight:600' : 'color:#94a3b8';
+                        const bStyle = !aWon ? 'font-weight:600' : 'color:#94a3b8';
+                        resultHtml = `
+                        <td style="text-align:right;${aStyle}">${esc(aName)}</td>
+                        <td style="text-align:center;white-space:nowrap;font-family:monospace;color:#64748b">${m.playerAScore} – ${m.playerBScore}</td>
+                        <td style="text-align:left;${bStyle}">${esc(bName)}</td>`;
+                    }
+                    return `<tr>${tableCell}${resultHtml}</tr>`;
+                }).join('');
+
+            const allDone = nonBye.every(m => m.isFinished);
+            const inProgressCount = nonBye.filter(m => !m.isFinished).length;
+            const note = allDone
+                ? `<span style="font-size:0.78rem;color:#64748b;margin-left:0.5rem">All matches complete</span>`
+                : `<span style="font-size:0.78rem;color:#92400e;margin-left:0.5rem">${inProgressCount} match${inProgressCount !== 1 ? 'es' : ''} in progress</span>`;
+
+            titleEl.innerHTML = `${esc(displayRound.name)} ${note}`;
+
+            container.innerHTML = `<table style="table-layout:auto;min-width:400px">
+                <colgroup><col style="width:2.5rem"><col style="width:40%"><col style="width:80px"><col style="width:40%"></colgroup>
+                <thead><tr>
+                    <th style="text-align:right;color:#94a3b8" title="Table number">Tbl</th>
+                    <th style="text-align:right">Player</th>
+                    <th style="text-align:center">Score</th>
+                    <th style="text-align:left">Player</th>
+                </tr></thead>
+                <tbody>${rows}</tbody>
+            </table>`;
+        }
+        function toggleRoutePanel(playerId, standings, cut) {
+            const panel = document.getElementById('route-panel');
+
+            if (activeRoutePlayerId === playerId) {
+                // Close panel
+                activeRoutePlayerId = null;
+                panel.style.display = 'none';
+                panel.innerHTML = '';
+                renderStandings();  // re-render to remove active class
+                return;
+            }
+
+            activeRoutePlayerId = playerId;
+            renderStandings();  // re-render to set active class
+
+            const targetStanding = standings.find(s => s.playerId === playerId);
+            const targetName = targetStanding?.name ?? 'Player';
+
+            // Find current standing rank
+            const currentRank = standings.findIndex(s => s.playerId === playerId) + 1;
+            if (cut > 0 && currentRank <= cut) {
+                panel.innerHTML = renderRouteHTML(targetName, null, [], false, cut, true, currentRank);
+                panel.style.display = '';
+                wireRouteClose();
+                return;
+            }
+
+            const { routes, unfinished, noRound, noUnfinished, includeDraws } = findRoutes(playerId, cut);
+
+            panel.innerHTML = renderRouteHTML(targetName, unfinished, routes, includeDraws, cut, false, currentRank, noRound, noUnfinished);
+            panel.style.display = '';
+            wireRouteClose();
+        }
+
+        function renderRouteHTML(playerName, unfinished, routes, includeDraws, cut, alreadyIn, currentRank, noRound, noUnfinished) {
+            const closeBtn = `<button class="mini-btn" id="route-close-btn">✕ Close</button>`;
+
+            if (alreadyIn) {
+                return `<div class="route-panel">
+                <div class="route-panel-header">
+                    <h3>🎯 ${esc(playerName)}</h3>
+                    ${closeBtn}
+                </div>
+                <p class="route-intro" style="color:#166534">Currently in position ${currentRank} — within the top ${cut} cut! 🎉</p>
+            </div>`;
+            }
+
+            if (noRound) {
+                return `<div class="route-panel">
+                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
+                <p class="route-intro">No rounds have started yet.</p>
+            </div>`;
+            }
+
+            if (noUnfinished) {
+                return `<div class="route-panel">
+                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
+                <p class="route-intro">No matches currently in progress. Check back once the next round begins.</p>
+            </div>`;
+            }
+
+            if (routes.length === 0) {
+                return `<div class="route-panel">
+                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
+                <p style="color:#dc2626;font-size:0.875rem">No path to the top ${cut} found — even considering draws.</p>
+            </div>`;
+            }
+
+            const introText = includeDraws
+                ? `No path without draws found. These options require at least one draw:`
+                : `Showing ${routes.length > 1 ? 'up to 3 scenarios' : 'one scenario'} where <strong>${esc(playerName)}</strong> reaches the top ${cut}:`;
+
+            const scenarioCards = routes.map((route, i) => {
+                const chips = route.matchOutcomes.map((outcome, j) => {
+                    const m = unfinished[j];
+                    const aName = esc(m.playerAName);
+                    const bName = esc(m.playerBName);
+                    if (outcome === 0) {
+                        return `<span class="outcome-chip win">${aName} beats ${bName}</span>`;
+                    } else if (outcome === 1) {
+                        return `<span class="outcome-chip loss">${bName} beats ${aName}</span>`;
+                    } else {
+                        return `<span class="outcome-chip draw">${aName} draws with ${bName}</span>`;
+                    }
+                }).join('');
+                return `<div class="scenario-card">
+                <div class="scenario-label">Option ${i + 1}</div>
+                <div class="scenario-outcomes">${chips}</div>
+            </div>`;
+            }).join('');
+
+            return `<div class="route-panel">
+            <div class="route-panel-header">
+                <h3>🎯 Route to top cut — ${esc(playerName)}</h3>
+                ${closeBtn}
+            </div>
+            <p class="route-intro">${introText}</p>
+            ${scenarioCards}
+        </div>`;
+        }
+
+        function wireRouteClose() {
+            const btn = document.getElementById('route-close-btn');
+            if (btn) {
+                btn.addEventListener('click', () => {
+                    activeRoutePlayerId = null;
+                    document.getElementById('route-panel').style.display = 'none';
+                    renderStandings();
+                });
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Event info bar
+        // ═══════════════════════════════════════════════════════════
+        function renderEventInfoBar() {
+            const statusEl = document.getElementById('event-status-text');
+            const linkEl = document.getElementById('event-ph-link');
+
+            linkEl.href = `https://tcg.ravensburgerplay.com/events/${eventId}`;
+
+            const cut = topCutSize(registrationCount);
+            const cutDesc = cut === 0 ? 'no top cut' : `top ${cut} cut`;
+            const roundInfo = (() => {
+                const swissRounds = rounds.filter(r => r.isSwiss);
+                const currentRnd = latestSwissRoundInfo();
+                if (!currentRnd) return 'awaiting first round';
+                const currentNum = swissRounds.indexOf(currentRnd) + 1;
+                const total = swissRounds.length;
+                return `Round ${currentNum} of ${total}`;
+            })();
+
+            let pillHtml, statusText;
+            if (isEventComplete) {
+                pillHtml = `<span class="event-status-pill complete">✓ Complete</span>`;
+                statusText = `${registrationCount} players · ${cutDesc}`;
+            } else {
+                const currentRnd = latestSwissRoundInfo();
+                const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
+                const hasUnfinished = currentMatches.some(m => !m.isFinished && !m.isBye);
+                if (hasUnfinished) {
+                    pillHtml = `<span class="event-status-pill live">● Live</span>`;
+                } else if (currentRnd) {
+                    pillHtml = `<span class="event-status-pill upcoming">⏸ Between rounds</span>`;
+                } else {
+                    pillHtml = `<span class="event-status-pill upcoming">⏳ Not started</span>`;
+                }
+                statusText = `${registrationCount} players · ${roundInfo} · ${cutDesc}`;
+            }
+
+            statusEl.innerHTML = `${pillHtml} <span>${esc(eventData?.name ?? '')}</span> <span class="muted">·</span> <span>${statusText}</span>`;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Status bar (last updated + countdown)
+        // ═══════════════════════════════════════════════════════════
+        function updateStatusBar() {
+            const now = new Date();
+            document.getElementById('last-updated-text').textContent =
+                `Updated ${now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+
+            if (isEventComplete) {
+                document.getElementById('countdown-wrap').style.display = 'none';
+                document.getElementById('refresh-btn').disabled = false;
+                return;
+            }
+
+            if (nextPollAt) {
+                document.getElementById('countdown-wrap').style.display = '';
+            }
+        }
+
+        function startCountdown() {
+            if (countdownInterval) clearInterval(countdownInterval);
+            if (isEventComplete) return;
+
+            countdownInterval = setInterval(() => {
+                if (!nextPollAt) return;
+                const remaining = Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1000));
+                const secsEl = document.getElementById('countdown-secs');
+                const fillEl = document.getElementById('countdown-fill');
+                if (secsEl) secsEl.textContent = remaining;
+
+                const fraction = (nextPollAt - Date.now()) / pollIntervalMs;
+                const pct = Math.max(0, Math.min(100, fraction * 100));
+                if (fillEl) fillEl.style.width = pct + '%';
+
+                if (remaining === 0) {
+                    clearInterval(countdownInterval);
+                }
+            }, 1_000);
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Load all round data (fetch matches for each round)
+        //  Returns the index of the last round with any matches.
+        // ═══════════════════════════════════════════════════════════
+        async function fetchAllRoundData() {
+            for (const rnd of rounds) {
+                const raw = await apiFetchRoundMatches(rnd.id);
+                matchesByRound[rnd.id] = raw.map(m => parseMatchRecord(m, rnd));
+
+                // Collect player IDs from matches
+                for (const m of matchesByRound[rnd.id]) {
+                    if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
+                    if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Incremental poll: only re-fetch rounds that may have changed
+        // ═══════════════════════════════════════════════════════════
+        async function pollUpdate() {
+            // Re-fetch event to detect status changes and new rounds
+            const newEvent = await apiFetchEvent();
+            const newRounds = parseRoundsFromEvent(newEvent);
+
+            // Check if any new rounds appeared (tournament_phases updated)
+            const prevRoundIds = new Set(rounds.map(r => r.id));
+            const newRoundIds = new Set(newRounds.map(r => r.id));
+            const addedRounds = newRounds.filter(r => !prevRoundIds.has(r.id));
+
+            eventData = newEvent;
+            isEventComplete = newEvent.display_status === 'complete';
+
+            // If new rounds appeared, update our rounds list and fetch new rounds
+            if (addedRounds.length > 0) {
+                rounds = newRounds;
+                for (const rnd of addedRounds) {
+                    const raw = await apiFetchRoundMatches(rnd.id);
+                    matchesByRound[rnd.id] = raw.map(m => parseMatchRecord(m, rnd));
+                    for (const m of matchesByRound[rnd.id]) {
+                        if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
+                        if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
+                    }
+                }
+            }
+
+            // Re-fetch the most recent rounds (last Swiss + any elimination rounds)
+            // to pick up new match results
+            const roundsToRefresh = [];
+
+            // Find the current Swiss round and the one before it (might have just completed)
+            const swissRounds = rounds.filter(r => r.isSwiss);
+            let latestSwissWithMatches = null;
+            for (const rnd of swissRounds) {
+                if ((matchesByRound[rnd.id] ?? []).length > 0) latestSwissWithMatches = rnd;
+            }
+            // Also try fetching the next Swiss round (in case a new one just got paired)
+            if (latestSwissWithMatches) {
+                roundsToRefresh.push(latestSwissWithMatches);
+                const nextIdx = latestSwissWithMatches.index + 1;
+                if (nextIdx < rounds.length) roundsToRefresh.push(rounds[nextIdx]);
+            } else if (swissRounds.length > 0) {
+                roundsToRefresh.push(swissRounds[0]);
+            }
+
+            // If complete, also re-fetch elimination rounds
+            if (isEventComplete) {
+                for (const rnd of rounds.filter(r => !r.isSwiss)) {
+                    roundsToRefresh.push(rnd);
+                }
+            }
+
+            // De-duplicate and fetch
+            const seen = new Set();
+            for (const rnd of roundsToRefresh) {
+                if (seen.has(rnd.id)) continue;
+                seen.add(rnd.id);
+                const raw = await apiFetchRoundMatches(rnd.id);
+                // Only overwrite existing data if we actually got matches back;
+                // an empty result likely means a transient error, not a real empty round.
+                if (raw.length === 0 && (matchesByRound[rnd.id] ?? []).length > 0) continue;
+                const parsed = raw.map(m => parseMatchRecord(m, rnd));
+                matchesByRound[rnd.id] = parsed;
+                for (const m of parsed) {
+                    if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
+                    if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Polling scheduler
+        // ═══════════════════════════════════════════════════════════
+        function scheduleNextPoll() {
+            if (isEventComplete) {
+                document.getElementById('countdown-wrap').style.display = 'none';
+                return;
+            }
+            if (pollTimer) clearTimeout(pollTimer);
+            if (countdownInterval) clearInterval(countdownInterval);
+
+            pollIntervalMs = Math.random() * (POLL_MAX_MS - POLL_MIN_MS) + POLL_MIN_MS;
+            nextPollAt = Date.now() + pollIntervalMs;
+
+            pollTimer = setTimeout(doPoll, pollIntervalMs);
+            document.getElementById('countdown-wrap').style.display = '';
+            document.getElementById('countdown-fill').style.transition = 'none';
+            document.getElementById('countdown-fill').style.width = '100%';
+            // Force reflow then re-enable transition
+            void document.getElementById('countdown-fill').offsetWidth;
+            document.getElementById('countdown-fill').style.transition = `width ${pollIntervalMs / 1000}s linear`;
+            document.getElementById('countdown-fill').style.width = '0%';
+
+            startCountdown();
+        }
+
+        async function doPoll() {
+            if (isRefreshing) return;
+            isRefreshing = true;
+            document.getElementById('refresh-btn').disabled = true;
+            setLoadingMsg(null, true);  // subtle indicator
+
+            try {
+                await pollUpdate();
+            } catch (err) {
+                console.warn('Poll failed:', err);
+            } finally {
+                isRefreshing = false;
+                document.getElementById('refresh-btn').disabled = false;
+            }
+
+            renderEventInfoBar();
+            renderStandings();
+            renderLatestRoundMatches();
+            updateStatusBar();
+
+            if (!isEventComplete) {
+                scheduleNextPoll();
+            } else {
+                document.getElementById('countdown-wrap').style.display = 'none';
+            }
+        }
+
+        // Light status indicator during refresh
+        function setLoadingMsg(msg, subtle = false) {
+            const updEl = document.getElementById('last-updated-text');
+            if (subtle) {
+                const existing = updEl.textContent;
+                if (!existing.includes('…')) updEl.textContent = existing + ' (refreshing…)';
+            } else if (msg) {
+                document.getElementById('loading-msg').textContent = msg;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Initial load
+        // ═══════════════════════════════════════════════════════════
+        async function initialLoad() {
+            try {
+                // Fetch event
+                setLoadingMsg('Fetching event details…');
+                eventData = await apiFetchEvent();
+                isEventComplete = eventData.display_status === 'complete';
+                rounds = parseRoundsFromEvent(eventData);
+                registrationCount = eventData.starting_player_count ?? 0;
+
+                document.getElementById('header-title').textContent = `🎴 ${eventData.name ?? `Event ${eventId}`}`;
+                document.title = `Watch: ${eventData.name ?? `Event ${eventId}`}`;
+
+                // Fetch registrations for player names and count
+                setLoadingMsg('Fetching registrations…');
+                const regs = await apiFetchRegistrations();
+                if (registrationCount === 0) registrationCount = regs.length;
+                for (const reg of regs) {
+                    const uid = reg.user?.id ?? null;
+                    const name = reg.best_identifier ?? reg.user?.best_identifier ?? 'Unknown';
+                    if (uid != null) playerNames[uid] = name;
+                }
+
+                // Fetch match data for all rounds
+                setLoadingMsg('Fetching match data…');
+                await fetchAllRoundData();
+
+                // Show app
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('app').style.display = '';
+
+                renderEventInfoBar();
+                renderStandings();
+                renderLatestRoundMatches();
+                updateStatusBar();
+
+                if (!isEventComplete) {
+                    scheduleNextPoll();
+                }
+            } catch (err) {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error-screen').style.display = '';
+                document.getElementById('error-msg').textContent = `Failed to load event ${eventId}: ${err.message}`;
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Screen helpers
+        // ═══════════════════════════════════════════════════════════
+        function showEntryScreen(errorMsg) {
+            // Reset all state for a new event
+            if (pollTimer) clearTimeout(pollTimer);
+            if (countdownInterval) clearInterval(countdownInterval);
+            pollTimer = null; nextPollAt = null; isRefreshing = false;
+            eventData = null; rounds = []; matchesByRound = {};
+            playerNames = {}; allPlayerIds = []; registrationCount = 0;
+            isEventComplete = false; activeRoutePlayerId = null;
+            document.getElementById('header-title').textContent = '🎴 Watch Event';
+            document.title = 'Watch Event — Set Championships';
+
+            document.getElementById('entry-screen').style.display = '';
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('error-screen').style.display = 'none';
+            document.getElementById('app').style.display = 'none';
+            document.getElementById('rounds-section').style.display = 'none';
+
+            const errEl = document.getElementById('entry-error');
+            if (errorMsg) { errEl.textContent = errorMsg; errEl.style.display = ''; }
+            else errEl.style.display = 'none';
+        }
+
+        function showLoadingScreen(msg) {
+            document.getElementById('entry-screen').style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('error-screen').style.display = 'none';
+            document.getElementById('app').style.display = 'none';
+            if (msg) document.getElementById('loading-msg').textContent = msg;
+        }
+
+        function extractIdFromInput(val) {
+            val = val.trim();
+            // Bare numeric ID
+            if (/^\d+$/.test(val)) return val;
+            // URL containing /events/12345
+            const m = val.match(/\/events\/(\d+)/);
+            return m ? m[1] : null;
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Bootstrap
+        // ═══════════════════════════════════════════════════════════
+        (function init() {
+            // Wire up entry form
+            document.getElementById('entry-form').addEventListener('submit', e => {
+                e.preventDefault();
+                const val = document.getElementById('entry-url-input').value;
+                const id = extractIdFromInput(val);
+                if (!id) {
+                    document.getElementById('entry-error').textContent = 'Could not find an event ID in that URL. Try pasting the full event URL.';
+                    document.getElementById('entry-error').style.display = '';
+                    return;
+                }
+                // Update URL and load
+                const url = new URL(window.location);
+                url.searchParams.set('id', id);
+                window.history.replaceState({}, '', url);
+                eventId = id;
+                startEventLoad();
+            });
+
+            // Wire entry input focus style
+            const input = document.getElementById('entry-url-input');
+            input.addEventListener('focus', () => input.style.borderColor = '#2563eb');
+            input.addEventListener('blur', () => input.style.borderColor = '#cbd5e1');
+
+            // Wire "Change event" button
+            document.getElementById('change-event-btn').addEventListener('click', () => {
+                const url = new URL(window.location);
+                url.searchParams.delete('id');
+                window.history.replaceState({}, '', url);
+                eventId = null;
+                showEntryScreen();
+                document.getElementById('entry-url-input').focus();
+            });
+
+            // Wire "Try another event" link on error screen
+            document.getElementById('error-try-another').addEventListener('click', e => {
+                e.preventDefault();
+                const url = new URL(window.location);
+                url.searchParams.delete('id');
+                window.history.replaceState({}, '', url);
+                eventId = null;
+                showEntryScreen();
+                document.getElementById('entry-url-input').focus();
+            });
+
+            // Wire refresh button (delegated — button exists throughout app lifetime)
+            document.getElementById('refresh-btn').addEventListener('click', () => {
+                if (isRefreshing) return;
+                if (pollTimer) clearTimeout(pollTimer);
+                if (countdownInterval) clearInterval(countdownInterval);
+                doPoll();
+            });
+
+            // Decide initial view
+            const params = new URLSearchParams(window.location.search);
+            const idParam = params.get('id');
+            if (idParam && /^\d+$/.test(idParam)) {
+                eventId = idParam;
+                startEventLoad();
+            } else {
+                showEntryScreen();
+            }
+        })();
+
+        function startEventLoad() {
+            showLoadingScreen('Loading event…');
+            initialLoad();
+        }
+    </script>
+</body>
+
+</html>
