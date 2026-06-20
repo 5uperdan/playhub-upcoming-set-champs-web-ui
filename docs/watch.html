@@ -65,6 +65,8 @@
                 </div>
             </div>
 
+
+
             <!-- Standings -->
             <div id="standings-section">
                 <div class="section-header">
@@ -94,6 +96,30 @@
         </div>
     </div>
 
+    <!-- Data correction modal -->
+    <dialog id="data-correction-dialog"
+        style="border:none;border-radius:12px;padding:0;max-width:420px;width:90%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+        <div style="padding:1.5rem 1.75rem">
+            <div style="font-size:2rem;text-align:center;margin-bottom:0.5rem">⚠️</div>
+            <h2 style="margin:0 0 0.75rem;font-size:1.1rem;text-align:center;color:#92400e">Result correction detected
+            </h2>
+            <p style="margin:0 0 1.25rem;font-size:0.9rem;line-height:1.5;color:#44403c">
+                A previous round result appears to have been changed by the Tournament Organiser.
+                Auto-refresh has been paused — the standings shown may be out of date.
+            </p>
+            <p style="margin:0 0 1.5rem;font-size:0.9rem;line-height:1.5;color:#44403c">
+                Please <strong>reload the page</strong> in your browser to fetch the corrected data.
+            </p>
+            <div style="display:flex;gap:0.75rem;justify-content:center">
+                <button onclick="location.reload()"
+                    style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:0.55rem 1.25rem;font-size:0.9rem;font-weight:600;cursor:pointer">Reload
+                    now</button>
+                <button onclick="document.getElementById('data-correction-dialog').close()"
+                    style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;border-radius:6px;padding:0.55rem 1.25rem;font-size:0.9rem;cursor:pointer">Dismiss</button>
+            </div>
+        </div>
+    </dialog>
+
     <script>
         // ═══════════════════════════════════════════════════════════
         //  Constants
@@ -122,6 +148,29 @@
         let pollIntervalMs = 60_000;
         let countdownInterval = null;
         let isRefreshing = false;
+        let pollCount = 0;             // incremented every doPoll call; reset after each integrity check
+        let roundFingerprints = {};    // roundId → fingerprint string of finished match results
+
+        // ═══════════════════════════════════════════════════════════
+        //  Round fingerprint: a compact string of all finished match
+        //  results in a round, used to detect TO result corrections.
+        // ═══════════════════════════════════════════════════════════
+        function fingerprintRound(matches) {
+            return matches
+                .filter(m => m.isFinished)
+                .map(m => `${m.playerAId}:${m.playerBId}:${m.winnerId}:${m.playerAScore}:${m.playerBScore}`)
+                .sort()
+                .join('|');
+        }
+
+        function storeFingerprints() {
+            for (const rnd of rounds) {
+                const ms = matchesByRound[rnd.id];
+                if (ms && ms.length > 0) {
+                    roundFingerprints[rnd.id] = fingerprintRound(ms);
+                }
+            }
+        }
 
         // ═══════════════════════════════════════════════════════════
         //  API helpers
@@ -994,21 +1043,27 @@
             }, 1_000);
         }
 
+        async function fetchRoundAndStore(rnd) {
+            const raw = await apiFetchRoundMatches(rnd.id);
+            if (raw.length === 0 && (matchesByRound[rnd.id] ?? []).length > 0) return false; // guard transient empty
+            const parsed = raw.map(m => parseMatchRecord(m, rnd));
+            matchesByRound[rnd.id] = parsed;
+            roundFingerprints[rnd.id] = fingerprintRound(parsed);
+            for (const m of parsed) {
+                if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
+                if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
+            }
+            return true;
+        }
+
         // ═══════════════════════════════════════════════════════════
         //  Load all round data (fetch matches for each round)
-        //  Returns the index of the last round with any matches.
         // ═══════════════════════════════════════════════════════════
         async function fetchAllRoundData() {
             for (const rnd of rounds) {
-                const raw = await apiFetchRoundMatches(rnd.id);
-                matchesByRound[rnd.id] = raw.map(m => parseMatchRecord(m, rnd));
-
-                // Collect player IDs from matches
-                for (const m of matchesByRound[rnd.id]) {
-                    if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
-                    if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
-                }
+                await fetchRoundAndStore(rnd);
             }
+            storeFingerprints();
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -1073,21 +1128,38 @@
                 if (nextIdx < rounds.length) roundsToRefresh.push(rounds[nextIdx]);
             }
 
+            // After 5 refreshes since last integrity check, re-fetch the previous completed
+            // round and compare fingerprints to detect any TO result corrections.
+            if (pollCount >= 5 && activeRnd) {
+                pollCount = 0;  // reset regardless of outcome
+                const prevIdx = activeRnd.index - 1;
+                if (prevIdx >= 0) {
+                    const prevRnd = rounds[prevIdx];
+                    if (!roundsToRefresh.find(r => r.id === prevRnd.id)) {
+                        const raw = await apiFetchRoundMatches(prevRnd.id);
+                        if (raw.length > 0) {
+                            const newFp = fingerprintRound(raw.map(m => parseMatchRecord(m, prevRnd)));
+                            if (newFp !== (roundFingerprints[prevRnd.id] ?? '')) {
+                                // Result correction detected — stop polling and warn the user
+                                console.warn(`Result correction detected in ${prevRnd.name}, pausing auto-refresh`);
+                                if (pollTimer) clearTimeout(pollTimer);
+                                if (countdownInterval) clearInterval(countdownInterval);
+                                pollTimer = null;
+                                document.getElementById('countdown-wrap').style.display = 'none';
+                                document.getElementById('data-correction-dialog').showModal();
+                                return; // skip normal refresh loop below
+                            }
+                        }
+                    }
+                }
+            }
+
             // De-duplicate and fetch
             const seen = new Set();
             for (const rnd of roundsToRefresh) {
                 if (seen.has(rnd.id)) continue;
                 seen.add(rnd.id);
-                const raw = await apiFetchRoundMatches(rnd.id);
-                // Only overwrite existing data if we actually got matches back;
-                // an empty result likely means a transient error, not a real empty round.
-                if (raw.length === 0 && (matchesByRound[rnd.id] ?? []).length > 0) continue;
-                const parsed = raw.map(m => parseMatchRecord(m, rnd));
-                matchesByRound[rnd.id] = parsed;
-                for (const m of parsed) {
-                    if (m.playerAId != null && !allPlayerIds.includes(m.playerAId)) allPlayerIds.push(m.playerAId);
-                    if (m.playerBId != null && !allPlayerIds.includes(m.playerBId)) allPlayerIds.push(m.playerBId);
-                }
+                await fetchRoundAndStore(rnd);
             }
         }
 
@@ -1120,6 +1192,7 @@
         async function doPoll() {
             if (isRefreshing) return;
             isRefreshing = true;
+            pollCount++;  // counts refreshes since last integrity check
             document.getElementById('refresh-btn').disabled = true;
             setLoadingMsg(null, true);  // subtle indicator
 
@@ -1210,8 +1283,8 @@
             // Reset all state for a new event
             if (pollTimer) clearTimeout(pollTimer);
             if (countdownInterval) clearInterval(countdownInterval);
-            pollTimer = null; nextPollAt = null; isRefreshing = false;
-            eventData = null; rounds = []; matchesByRound = {};
+            pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
+            eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
             isEventComplete = false; activeRoutePlayerId = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
