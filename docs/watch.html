@@ -935,7 +935,10 @@
                 pillHtml = `<span class="event-status-pill complete">✓ Complete</span>`;
                 statusText = `${registrationCount} players · ${cutDesc}`;
             } else {
-                const currentRnd = latestSwissRoundInfo();
+                // Check elim rounds first, then fall back to Swiss
+                const elimRnds = rounds.filter(r => !r.isSwiss && (matchesByRound[r.id] ?? []).length > 0);
+                const latestElim = elimRnds.length > 0 ? elimRnds[elimRnds.length - 1] : null;
+                const currentRnd = latestElim ?? latestSwissRoundInfo();
                 const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
                 const hasUnfinished = currentMatches.some(m => !m.isFinished && !m.isBye);
                 if (hasUnfinished) {
@@ -1037,29 +1040,37 @@
                 }
             }
 
-            // Re-fetch the most recent rounds (last Swiss + any elimination rounds)
-            // to pick up new match results
+            // Re-fetch only the currently active round.
+            // Priority: deepest elim round that has unfinished matches → deepest elim round with
+            // any matches (complete, awaiting next) → last Swiss round with matches → first Swiss.
+            // Also probe the next round in the list to detect newly paired rounds.
             const roundsToRefresh = [];
 
-            // Find the current Swiss round and the one before it (might have just completed)
-            const swissRounds = rounds.filter(r => r.isSwiss);
-            let latestSwissWithMatches = null;
-            for (const rnd of swissRounds) {
-                if ((matchesByRound[rnd.id] ?? []).length > 0) latestSwissWithMatches = rnd;
-            }
-            // Also try fetching the next Swiss round (in case a new one just got paired)
-            if (latestSwissWithMatches) {
-                roundsToRefresh.push(latestSwissWithMatches);
-                const nextIdx = latestSwissWithMatches.index + 1;
-                if (nextIdx < rounds.length) roundsToRefresh.push(rounds[nextIdx]);
-            } else if (swissRounds.length > 0) {
-                roundsToRefresh.push(swissRounds[0]);
+            // Identify the active round
+            const elimRoundsWithMatches = rounds.filter(r => !r.isSwiss && (matchesByRound[r.id] ?? []).length > 0);
+            const elimRoundsUnfinished = elimRoundsWithMatches.filter(
+                r => (matchesByRound[r.id] ?? []).some(m => !m.isFinished && !m.isBye)
+            );
+
+            let activeRnd = null;
+            if (elimRoundsUnfinished.length > 0) {
+                activeRnd = elimRoundsUnfinished[elimRoundsUnfinished.length - 1];
+            } else if (elimRoundsWithMatches.length > 0) {
+                activeRnd = elimRoundsWithMatches[elimRoundsWithMatches.length - 1];
+            } else {
+                // Swiss phase
+                const swissRounds = rounds.filter(r => r.isSwiss);
+                for (const rnd of swissRounds) {
+                    if ((matchesByRound[rnd.id] ?? []).length > 0) activeRnd = rnd;
+                }
+                if (!activeRnd && swissRounds.length > 0) activeRnd = swissRounds[0];
             }
 
-            // Always re-fetch all elimination rounds — even if they had no matches last time,
-            // they may have just been paired by the TO
-            for (const rnd of rounds.filter(r => !r.isSwiss)) {
-                roundsToRefresh.push(rnd);
+            if (activeRnd) {
+                roundsToRefresh.push(activeRnd);
+                // Also probe the next round in case it just got paired
+                const nextIdx = activeRnd.index + 1;
+                if (nextIdx < rounds.length) roundsToRefresh.push(rounds[nextIdx]);
             }
 
             // De-duplicate and fetch
