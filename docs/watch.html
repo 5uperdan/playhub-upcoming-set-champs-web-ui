@@ -586,11 +586,24 @@
             const noteEl = document.getElementById('standings-note');
             if (isEventComplete) {
                 noteEl.textContent = 'Final results';
-            } else if (currentRnd) {
-                const statusPart = hasUnfinished ? 'in progress' : 'complete';
-                noteEl.textContent = `${currentRnd.name} ${statusPart} · ${totalSwissRounds} Swiss round${totalSwissRounds !== 1 ? 's' : ''}`;
             } else {
-                noteEl.textContent = 'Waiting for first round…';
+                // Find the latest elim round with any matches
+                let latestElimRnd = null;
+                for (const rnd of rounds) {
+                    if (!rnd.isSwiss && (matchesByRound[rnd.id] ?? []).length > 0) latestElimRnd = rnd;
+                }
+
+                if (latestElimRnd) {
+                    const elimMatches = (matchesByRound[latestElimRnd.id] ?? []).filter(m => !m.isBye);
+                    const elimUnfinished = elimMatches.some(m => !m.isFinished);
+                    const statusPart = elimUnfinished ? 'in progress' : 'complete';
+                    noteEl.textContent = `${latestElimRnd.name} ${statusPart} · Swiss standings frozen`;
+                } else if (currentRnd) {
+                    const statusPart = hasUnfinished ? 'in progress' : 'complete';
+                    noteEl.textContent = `${currentRnd.name} ${statusPart} · ${totalSwissRounds} Swiss round${totalSwissRounds !== 1 ? 's' : ''}`;
+                } else {
+                    noteEl.textContent = 'Waiting for first round…';
+                }
             }
 
             // Build table HTML
