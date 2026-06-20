@@ -626,9 +626,23 @@
                     : '';
                 const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${routeBtn}</span></td>`;
 
-                // Row background: green tint for players who have finished their round match
-                const isDone = !isEventComplete && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
-                const rowBg = isDone ? 'background:#f0fdf4' : '';
+                // Determine row background based on KO/round status
+                const koRounds = rounds.filter(r => !r.isSwiss);
+                const koStarted = koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0);
+
+                // Players eliminated in KO: lost a finished non-Swiss match
+                const isKoEliminated = !isEventComplete && koStarted && getAllMatches().some(
+                    m => !m.isSwiss && m.isFinished && !m.isDraw &&
+                        m.winnerId != null && m.winnerId !== s.playerId &&
+                        (m.playerAId === s.playerId || m.playerBId === s.playerId)
+                );
+                // Players who didn't make the cut once KO has started
+                const missedCut = !isEventComplete && koStarted && cut > 0 && idx >= cut;
+
+                const isDone = !isEventComplete && !koStarted && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
+                const rowBg = (isKoEliminated || missedCut) ? 'background:#fff1f2'
+                    : isDone ? 'background:#f0fdf4'
+                        : '';
 
                 // Final position cell (complete tournament only)
                 let finalPosCell = '';
@@ -1023,9 +1037,9 @@
                 roundsToRefresh.push(swissRounds[0]);
             }
 
-            // If complete, also re-fetch elimination rounds
-            if (isEventComplete) {
-                for (const rnd of rounds.filter(r => !r.isSwiss)) {
+            // Re-fetch all elimination rounds that have already started (even if not complete yet)
+            for (const rnd of rounds.filter(r => !r.isSwiss)) {
+                if ((matchesByRound[rnd.id] ?? []).length > 0 || isEventComplete) {
                     roundsToRefresh.push(rnd);
                 }
             }
