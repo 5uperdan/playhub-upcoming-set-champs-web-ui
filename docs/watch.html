@@ -555,7 +555,11 @@
             const doneIds = new Set();
             const playingIds = new Set();
             for (const m of currentMatches) {
-                if (m.isBye) continue;
+                if (m.isBye) {
+                    // Bye counts as an immediate win — mark the player as done
+                    if (m.playerAId != null) doneIds.add(m.playerAId);
+                    continue;
+                }
                 if (m.isFinished) {
                     if (m.playerAId != null) doneIds.add(m.playerAId);
                     if (m.playerBId != null) doneIds.add(m.playerBId);
@@ -603,8 +607,6 @@
             ];
             if (isEventComplete) {
                 colHdrs.push(`<th style="width:4rem;text-align:center">Position</th>`);
-            } else {
-                colHdrs.push(`<th style="width:3rem;text-align:center" title="Current round status">Rd</th>`);
             }
 
             const thead = `<thead><tr>${colHdrs.join('')}</tr></thead>`;
@@ -622,21 +624,11 @@
                 const routeBtn = showRouteBtn
                     ? ` <button class="route-btn${activeRoutePlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Route to top ${cut}">🎯</button>`
                     : '';
-                const nameCell = `<td style="font-weight:500">${esc(s.name)}${routeBtn}</td>`;
+                const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${routeBtn}</span></td>`;
 
-                // Round status
-                let roundStatusCell = '';
-                if (!isEventComplete) {
-                    let badge;
-                    if (doneIds.has(s.playerId) && !playingIds.has(s.playerId)) {
-                        badge = `<span class="round-badge done" title="Round complete">✓</span>`;
-                    } else if (playingIds.has(s.playerId)) {
-                        badge = `<span class="round-badge playing" title="Match in progress">⏳</span>`;
-                    } else {
-                        badge = `<span class="round-badge none" title="No match">–</span>`;
-                    }
-                    roundStatusCell = `<td style="text-align:center">${badge}</td>`;
-                }
+                // Row background: green tint for players who have finished their round match
+                const isDone = !isEventComplete && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
+                const rowBg = isDone ? 'background:#f0fdf4' : '';
 
                 // Final position cell (complete tournament only)
                 let finalPosCell = '';
@@ -650,9 +642,13 @@
                     finalPosCell = `<td style="text-align:center"><span class="pos-badge ${cls}">${esc(pos ?? '—')}</span></td>`;
                 }
 
-                const cutClass = isCutBorder ? ' class="cut-divider"' : '';
+                const cutClass = isCutBorder ? 'cut-divider' : '';
+                const trAttrs = [
+                    cutClass ? `class="${cutClass}"` : '',
+                    rowBg ? `style="${rowBg}"` : ''
+                ].filter(Boolean).join(' ');
 
-                return `<tr${cutClass}>${rankCell}${nameCell}
+                return `<tr${trAttrs ? ' ' + trAttrs : ''}>${rankCell}${nameCell}
                 <td style="text-align:right;font-weight:600">${s.points}</td>
                 <td style="text-align:right;color:#166534">${s.wins}</td>
                 <td style="text-align:right;color:#991b1b">${s.losses}</td>
@@ -660,7 +656,7 @@
                 <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.omw)}</td>
                 <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.gw)}</td>
                 <td style="text-align:right;font-family:monospace;font-size:0.82rem">${pct(s.ogw)}</td>
-                ${isEventComplete ? finalPosCell : roundStatusCell}
+                ${isEventComplete ? finalPosCell : ''}
             </tr>`;
             }).join('');
 
@@ -791,6 +787,7 @@
                 panel.innerHTML = renderRouteHTML(targetName, null, [], false, cut, true, currentRank);
                 panel.style.display = '';
                 wireRouteClose();
+                panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 return;
             }
 
@@ -799,6 +796,7 @@
             panel.innerHTML = renderRouteHTML(targetName, unfinished, routes, includeDraws, cut, false, currentRank, noRound, noUnfinished);
             panel.style.display = '';
             wireRouteClose();
+            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
         function renderRouteHTML(playerName, unfinished, routes, includeDraws, cut, alreadyIn, currentRank, noRound, noUnfinished) {
