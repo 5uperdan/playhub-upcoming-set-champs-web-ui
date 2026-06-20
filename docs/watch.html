@@ -627,19 +627,25 @@
                 const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${routeBtn}</span></td>`;
 
                 // Determine row background based on KO/round status
+                // Swiss is "done" when the last Swiss round has all non-bye matches finished
+                const lastSwissRnd = latestSwissRoundInfo();
+                const lastSwissComplete = lastSwissRnd != null &&
+                    (matchesByRound[lastSwissRnd.id] ?? []).filter(m => !m.isBye).every(m => m.isFinished);
                 const koRounds = rounds.filter(r => !r.isSwiss);
                 const koStarted = koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0);
+                // Show elimination shading as soon as Swiss is complete (cut is now locked)
+                const showElimShading = !isEventComplete && cut > 0 && (koStarted || lastSwissComplete);
 
                 // Players eliminated in KO: lost a finished non-Swiss match
-                const isKoEliminated = !isEventComplete && koStarted && getAllMatches().some(
+                const isKoEliminated = showElimShading && koStarted && getAllMatches().some(
                     m => !m.isSwiss && m.isFinished && !m.isDraw &&
                         m.winnerId != null && m.winnerId !== s.playerId &&
                         (m.playerAId === s.playerId || m.playerBId === s.playerId)
                 );
-                // Players who didn't make the cut once KO has started
-                const missedCut = !isEventComplete && koStarted && cut > 0 && idx >= cut;
+                // Players who didn't make the cut
+                const missedCut = showElimShading && idx >= cut;
 
-                const isDone = !isEventComplete && !koStarted && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
+                const isDone = !isEventComplete && !showElimShading && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
                 const rowBg = (isKoEliminated || missedCut) ? 'background:#fff1f2'
                     : isDone ? 'background:#f0fdf4'
                         : '';
@@ -1037,11 +1043,10 @@
                 roundsToRefresh.push(swissRounds[0]);
             }
 
-            // Re-fetch all elimination rounds that have already started (even if not complete yet)
+            // Always re-fetch all elimination rounds — even if they had no matches last time,
+            // they may have just been paired by the TO
             for (const rnd of rounds.filter(r => !r.isSwiss)) {
-                if ((matchesByRound[rnd.id] ?? []).length > 0 || isEventComplete) {
-                    roundsToRefresh.push(rnd);
-                }
+                roundsToRefresh.push(rnd);
             }
 
             // De-duplicate and fetch
