@@ -203,16 +203,20 @@
         }
 
         async function apiFetchRoundMatches(roundId) {
-            // Try the non-paginated endpoint first (most common), fall back to paginated
-            try {
-                const data = await phFetch(`/tournament-rounds/${roundId}/matches/`);
-                if (data.matches) return data.matches;
-            } catch (_) { /* fall through */ }
-            try {
-                const data = await phFetch(`/tournament-rounds/${roundId}/matches/paginated/`);
-                if (data.results) return data.results;
-            } catch (_) { /* fall through */ }
-            return [];
+            // The non-paginated /matches/ endpoint returns 401 (Cloudflare hydraproxy
+            // restriction). Always use the paginated endpoint and collect all pages.
+            const all = [];
+            let page = 1;
+            while (true) {
+                const data = await phFetch(
+                    `/tournament-rounds/${roundId}/matches/paginated/?page=${page}&page_size=100&avoid_cache=false`
+                );
+                const results = data.results ?? [];
+                all.push(...results);
+                if (!data.next_page_number) break;
+                page = data.next_page_number;
+            }
+            return all;
         }
 
         // ═══════════════════════════════════════════════════════════
