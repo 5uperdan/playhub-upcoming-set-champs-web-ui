@@ -850,6 +850,49 @@ tr.cut-divider td {
     gap: 0.35rem;
 }
 
+/* ── Next round projection ── */
+.proj-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 4px;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    border: 1px solid transparent;
+    margin: 0.1rem 0.2rem 0.1rem 0;
+}
+.proj-chip.certain {
+    background: #f0fdf4;
+    border-color: #86efac;
+    color: #166534;
+}
+.proj-chip.possible {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #475569;
+}
+.proj-chip.bye {
+    background: #f1f5f9;
+    border-color: #e2e8f0;
+    color: #94a3b8;
+    font-style: italic;
+}
+.proj-pct {
+    font-size: 0.7rem;
+    color: #94a3b8;
+}
+.seed-badge {
+    display: inline-block;
+    background: #f1f5f9;
+    color: #64748b;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0.05rem 0.35rem;
+    border-radius: 3px;
+    font-variant-numeric: tabular-nums;
+}
+
 .outcome-chip {
     display: inline-flex;
     align-items: center;

@@ -93,6 +93,16 @@
                 </div>
             </div>
 
+            <!-- Next Round Projection -->
+            <div id="next-round-section" style="margin-top:1.5rem;display:none">
+                <div class="section-header">
+                    <h2 id="next-round-title">Next Round Projection</h2>
+                </div>
+                <div class="table-wrap">
+                    <div id="next-round-container" style="padding:0.75rem 1rem"></div>
+                </div>
+            </div>
+
         </div>
     </div>
 
@@ -990,6 +1000,401 @@
         }
 
         // ═══════════════════════════════════════════════════════════
+        //  Next Round Projection
+        // ═══════════════════════════════════════════════════════════
+
+        function buildOpponentHistory(matches) {
+            const h = new Map();
+            for (const m of matches) {
+                if (m.isBye || m.playerAId == null || m.playerBId == null) continue;
+                if (!h.has(m.playerAId)) h.set(m.playerAId, new Set());
+                if (!h.has(m.playerBId)) h.set(m.playerBId, new Set());
+                h.get(m.playerAId).add(m.playerBId);
+                h.get(m.playerBId).add(m.playerAId);
+            }
+            return h;
+        }
+
+        function buildByeRecipients(matches) {
+            const s = new Set();
+            for (const m of matches) if (m.isBye && m.playerAId != null) s.add(m.playerAId);
+            return s;
+        }
+
+        // Sort-then-pair Swiss algorithm: pair top→bottom, avoid rematches and double byes.
+        function swissPairAlgorithm(sortedStandings, oppHistory, byeRec) {
+            const rem = [...sortedStandings];
+            const pairings = [];
+
+            while (rem.length >= 2) {
+                const p1 = rem.shift();
+                const p1Opp = oppHistory.get(p1.playerId) ?? new Set();
+                let idx = rem.findIndex(p => !p1Opp.has(p.playerId));
+                if (idx < 0) idx = 0; // forced rematch
+                const p2 = rem.splice(idx, 1)[0];
+                pairings.push({ aId: p1.playerId, aName: p1.name, bId: p2.playerId, bName: p2.name });
+            }
+
+            let byeId = null, byeName = null;
+            if (rem.length === 1) {
+                const last = rem[0];
+                let assigned = false;
+                if (byeRec.has(last.playerId)) {
+                    // Try to swap with a pairing partner who hasn't had a bye
+                    for (let i = pairings.length - 1; i >= 0 && !assigned; i--) {
+                        const p = pairings[i];
+                        if (!byeRec.has(p.bId)) {
+                            byeId = p.bId; byeName = p.bName;
+                            pairings[i] = { ...p, bId: last.playerId, bName: last.name };
+                            assigned = true;
+                        } else if (!byeRec.has(p.aId)) {
+                            byeId = p.aId; byeName = p.aName;
+                            pairings[i] = { aId: last.playerId, aName: last.name, bId: p.bId, bName: p.bName };
+                            assigned = true;
+                        }
+                    }
+                }
+                if (!assigned) { byeId = last.playerId; byeName = last.name; }
+            }
+
+            return { pairings, byeId, byeName };
+        }
+
+        // Enumerate 2^N outcomes for unfinished matches, computing Swiss pairings for each.
+        // Returns possibleOpponents: Map<playerId, Map<oppId|'bye', {id, name, count}>>
+        function enumerateSwissScenarios(cappedUnfinished, baseFinished, totalScenarios) {
+            const possibleOpponents = new Map();
+            const addOpp = (pid, oppKey, oppName, oppId) => {
+                if (!possibleOpponents.has(pid)) possibleOpponents.set(pid, new Map());
+                const m = possibleOpponents.get(pid);
+                if (!m.has(oppKey)) m.set(oppKey, { id: oppId, name: oppName, count: 0 });
+                m.get(oppKey).count++;
+            };
+
+            for (let mask = 0; mask < totalScenarios; mask++) {
+                const hypo = [...baseFinished];
+                for (let i = 0; i < cappedUnfinished.length; i++) {
+                    const m = cappedUnfinished[i];
+                    const aWins = (mask >> i) & 1;
+                    hypo.push({
+                        ...m, isFinished: true, isDraw: false,
+                        winnerId: aWins ? m.playerAId : m.playerBId,
+                        playerAScore: aWins ? 2 : 0, playerBScore: aWins ? 0 : 2,
+                    });
+                }
+                const standings = computeStandings(hypo, allPlayerIds, playerNames);
+                sortStandings(standings);
+                const { pairings, byeId, byeName } = swissPairAlgorithm(
+                    standings, buildOpponentHistory(hypo), buildByeRecipients(hypo)
+                );
+                for (const p of pairings) {
+                    addOpp(p.aId, p.bId, p.bName, p.bId);
+                    addOpp(p.bId, p.aId, p.aName, p.aId);
+                }
+                if (byeId != null) addOpp(byeId, 'bye', 'BYE', null);
+            }
+            return possibleOpponents;
+        }
+
+        // Dedup: each pairing shown once from the higher-ranked player's perspective.
+        function buildDisplayRows(possibleOpponents, sortedPlayerIds) {
+            const shown = new Set();
+            const rows = [];
+            for (const pid of sortedPlayerIds) {
+                if (shown.has(pid)) continue;
+                const opps = possibleOpponents.get(pid);
+                if (!opps) continue;
+                shown.add(pid);
+                for (const [, opp] of opps) if (opp.id != null) shown.add(opp.id);
+                rows.push({
+                    playerId: pid,
+                    name: playerNames[pid] ?? 'Unknown',
+                    opps: [...opps.values()].sort((a, b) => b.count - a.count),
+                });
+            }
+            return rows;
+        }
+
+        // Project the next non-final Swiss round (rounds 2..N-1 in progress).
+        function projectNextSwissRound() {
+            const swissRounds = rounds.filter(r => r.isSwiss);
+            const currentRnd = latestSwissRoundInfo();
+            if (!currentRnd) return null;
+            const idx = swissRounds.indexOf(currentRnd);
+            if (idx < 0 || idx === swissRounds.length - 1) return null;
+
+            const allMatches = getAllMatches();
+            const unfinished = (matchesByRound[currentRnd.id] ?? []).filter(m => !m.isFinished && !m.isBye);
+            const MAX = 10;
+            const capped = unfinished.slice(0, MAX);
+            const total = Math.pow(2, capped.length);
+            const base = allMatches.filter(m => m.isFinished);
+
+            const possOpp = enumerateSwissScenarios(capped, base, total);
+            const displayStandings = computeStandings(base, allPlayerIds, playerNames);
+            sortStandings(displayStandings);
+            const rows = buildDisplayRows(possOpp, displayStandings.map(s => s.playerId));
+
+            return {
+                type: 'swiss',
+                nextRoundNum: idx + 2,
+                unfinishedCount: unfinished.length,
+                truncated: unfinished.length > MAX,
+                totalScenarios: total,
+                rows,
+            };
+        }
+
+        // Project the Top-N knockout bracket based on possible outcomes of the last Swiss round.
+        function projectKnockoutBracket() {
+            const cut = topCutSize(registrationCount);
+            if (cut === 0) return null;
+
+            const allMatches = getAllMatches();
+            const currentRnd = latestSwissRoundInfo();
+            const unfinished = currentRnd
+                ? (matchesByRound[currentRnd.id] ?? []).filter(m => !m.isFinished && !m.isBye)
+                : [];
+            const MAX = 10;
+            const capped = unfinished.slice(0, MAX);
+            const total = Math.pow(2, capped.length);
+            const base = allMatches.filter(m => m.isFinished);
+
+            // Per bracket slot (0 = seed1 vs seedN, 1 = seed2 vs seedN-1, …):
+            // track which pairings occur across scenarios.
+            const slotCounts = Array.from({ length: cut / 2 }, () => new Map());
+
+            for (let mask = 0; mask < total; mask++) {
+                const hypo = [...base];
+                for (let i = 0; i < capped.length; i++) {
+                    const m = capped[i];
+                    const aWins = (mask >> i) & 1;
+                    hypo.push({
+                        ...m, isFinished: true, isDraw: false,
+                        winnerId: aWins ? m.playerAId : m.playerBId,
+                        playerAScore: aWins ? 2 : 0, playerBScore: aWins ? 0 : 2,
+                    });
+                }
+                const standings = computeStandings(hypo, allPlayerIds, playerNames);
+                sortStandings(standings);
+                const top = standings.slice(0, cut);
+                for (let i = 0; i < cut / 2; i++) {
+                    const key = `${top[i].playerId}|${top[cut - 1 - i].playerId}`;
+                    slotCounts[i].set(key, (slotCounts[i].get(key) ?? 0) + 1);
+                }
+            }
+
+            const pairingSlots = slotCounts.map((slotMap, i) => {
+                const options = [...slotMap.entries()]
+                    .map(([key, count]) => {
+                        const [aId, bId] = key.split('|').map(Number);
+                        return { aId, aName: playerNames[aId] ?? 'Unknown', bId, bName: playerNames[bId] ?? 'Unknown', count };
+                    })
+                    .sort((a, b) => b.count - a.count);
+                return { slot: i + 1, options };
+            });
+
+            return { type: 'knockout-bracket', cut, pairingSlots, totalScenarios: total, unfinishedCount: unfinished.length };
+        }
+
+        // Project the next knockout round from the current KO state.
+        function projectNextKnockoutRound() {
+            const allMatches = getAllMatches();
+            const koRounds = rounds.filter(r => !r.isSwiss);
+            let latestKoRnd = null;
+            for (const r of koRounds) if ((matchesByRound[r.id] ?? []).length > 0) latestKoRnd = r;
+            if (!latestKoRnd) return null;
+
+            const latestKoMatches = (matchesByRound[latestKoRnd.id] ?? []).filter(m => !m.isBye);
+            if (latestKoMatches.length <= 1) return null; // final — nothing to project
+
+            // Seeds from Swiss standings
+            const swissFinished = allMatches.filter(m => m.isSwiss && m.isFinished);
+            const swissStandings = computeStandings(swissFinished, allPlayerIds, playerNames);
+            sortStandings(swissStandings);
+            const seedMap = new Map();
+            swissStandings.forEach((s, i) => seedMap.set(s.playerId, i + 1));
+            const nameOf = id => playerNames[id] ?? 'Unknown';
+
+            const koPlayers = new Set();
+            for (const m of latestKoMatches) {
+                if (m.playerAId != null) koPlayers.add(m.playerAId);
+                if (m.playerBId != null) koPlayers.add(m.playerBId);
+            }
+
+            // Losers from all KO rounds BEFORE the latest
+            const priorLosers = new Set();
+            for (const m of allMatches.filter(m => !m.isSwiss && m.isFinished && m.roundId !== latestKoRnd.id)) {
+                const lid = m.winnerId === m.playerAId ? m.playerBId : m.playerAId;
+                if (lid != null) priorLosers.add(lid);
+            }
+
+            const getSurvivors = (extraLosers) =>
+                [...koPlayers]
+                    .filter(pid => !priorLosers.has(pid) && !extraLosers.has(pid))
+                    .sort((a, b) => (seedMap.get(a) ?? 999) - (seedMap.get(b) ?? 999));
+
+            const koUnfinished = latestKoMatches.filter(m => !m.isFinished);
+
+            if (koUnfinished.length === 0) {
+                const latestLosers = new Set(
+                    latestKoMatches.map(m => m.winnerId === m.playerAId ? m.playerBId : m.playerAId).filter(Boolean)
+                );
+                const survivors = getSurvivors(latestLosers);
+                if (survivors.length < 2) return null;
+                const pairings = [];
+                for (let i = 0; i < survivors.length / 2; i++) {
+                    const aId = survivors[i], bId = survivors[survivors.length - 1 - i];
+                    pairings.push({
+                        aSeed: seedMap.get(aId) ?? '?', aId, aName: nameOf(aId),
+                        bSeed: seedMap.get(bId) ?? '?', bId, bName: nameOf(bId),
+                    });
+                }
+                return { type: 'knockout-next', pairings, certain: true };
+            }
+
+            // Enumerate unfinished KO match outcomes
+            const MAX = 8;
+            const capped = koUnfinished.slice(0, MAX);
+            const total = Math.pow(2, capped.length);
+            const alreadyLost = new Set(
+                latestKoMatches.filter(m => m.isFinished)
+                    .map(m => m.winnerId === m.playerAId ? m.playerBId : m.playerAId).filter(Boolean)
+            );
+
+            const koOppMap = new Map();
+            for (let mask = 0; mask < total; mask++) {
+                const extraLosers = new Set(alreadyLost);
+                for (let i = 0; i < capped.length; i++) {
+                    const m = capped[i];
+                    const lid = ((mask >> i) & 1) ? m.playerBId : m.playerAId;
+                    if (lid != null) extraLosers.add(lid);
+                }
+                const survivors = getSurvivors(extraLosers);
+                if (survivors.length < 2) continue;
+                for (let i = 0; i < survivors.length / 2; i++) {
+                    const aId = survivors[i], bId = survivors[survivors.length - 1 - i];
+                    for (const [pid, oppId] of [[aId, bId], [bId, aId]]) {
+                        if (!koOppMap.has(pid)) koOppMap.set(pid, new Map());
+                        koOppMap.get(pid).set(oppId, (koOppMap.get(pid).get(oppId) ?? 0) + 1);
+                    }
+                }
+            }
+
+            const shown = new Set();
+            const rows = [];
+            for (const pid of [...koOppMap.keys()].sort((a, b) => (seedMap.get(a) ?? 999) - (seedMap.get(b) ?? 999))) {
+                if (shown.has(pid)) continue;
+                shown.add(pid);
+                const opps = [...koOppMap.get(pid).entries()]
+                    .map(([id, count]) => ({ id, name: nameOf(id), seed: seedMap.get(id) ?? '?', count }))
+                    .sort((a, b) => b.count - a.count);
+                for (const o of opps) shown.add(o.id);
+                rows.push({ playerId: pid, name: nameOf(pid), seed: seedMap.get(pid) ?? '?', opps, totalScenarios: total });
+            }
+
+            return { type: 'knockout-next', rows, certain: false, totalScenarios: total, unfinishedCount: koUnfinished.length };
+        }
+
+        function computeNextRoundProjection() {
+            if (isEventComplete) return null;
+            const koRounds = rounds.filter(r => !r.isSwiss);
+            if (koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0)) return projectNextKnockoutRound();
+
+            const swissRounds = rounds.filter(r => r.isSwiss);
+            if (!swissRounds.length) return null;
+            const currentRnd = latestSwissRoundInfo();
+            if (!currentRnd) return null;
+            const idx = swissRounds.indexOf(currentRnd);
+            if (idx < 0) return null;
+
+            if (idx === swissRounds.length - 1) return projectKnockoutBracket();
+            return projectNextSwissRound();
+        }
+
+        function oppChipHTML(opp, totalScenarios) {
+            const certain = opp.count === totalScenarios;
+            const pct = Math.round(opp.count / totalScenarios * 100);
+            const pctSpan = certain ? '' : ` <span class="proj-pct">${pct}%</span>`;
+            if (opp.id == null) return `<span class="proj-chip bye">BYE${pctSpan}</span>`;
+            if (certain) return `<span class="proj-chip certain">${esc(opp.name)}</span>`;
+            return `<span class="proj-chip possible">${esc(opp.name)}${pctSpan}</span>`;
+        }
+
+        function renderNextRoundProjection() {
+            const section = document.getElementById('next-round-section');
+            if (!section) return;
+            const proj = computeNextRoundProjection();
+            if (!proj) { section.style.display = 'none'; return; }
+            section.style.display = '';
+
+            const titleEl = document.getElementById('next-round-title');
+            const container = document.getElementById('next-round-container');
+
+            if (proj.type === 'swiss') {
+                const note = proj.unfinishedCount > 0
+                    ? ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios} scenario${proj.totalScenarios !== 1 ? 's' : ''}${proj.truncated ? '+' : ''}</span>`
+                    : ` <span class="section-note">Round ${proj.nextRoundNum - 1} complete</span>`;
+                titleEl.innerHTML = `Round ${proj.nextRoundNum} Projection${note}`;
+                const rows = proj.rows.map(row =>
+                    `<tr>
+                        <td style="text-align:right;font-weight:500;padding-right:0.5rem;white-space:nowrap">${esc(row.name)}</td>
+                        <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.35rem;white-space:nowrap">vs</td>
+                        <td style="padding:0.15rem 0">${row.opps.map(o => oppChipHTML(o, proj.totalScenarios)).join('')}</td>
+                    </tr>`
+                ).join('');
+                container.innerHTML = `<table style="table-layout:auto"><tbody>${rows}</tbody></table>`;
+
+            } else if (proj.type === 'knockout-bracket') {
+                const note = proj.unfinishedCount > 0
+                    ? ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios} scenario${proj.totalScenarios !== 1 ? 's' : ''}</span>`
+                    : ``;
+                titleEl.innerHTML = `Top ${proj.cut} Bracket${note}`;
+                const rows = proj.pairingSlots.map(slot => {
+                    if (!slot.options.length) return '';
+                    const top = slot.options[0];
+                    if (top.count === proj.totalScenarios) {
+                        return `<tr>
+                            <td style="text-align:right;font-weight:500;padding-right:0.5rem"><span class="seed-badge">${slot.slot}</span> ${esc(top.aName)}</td>
+                            <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.5rem;white-space:nowrap">vs</td>
+                            <td style="font-weight:500">${esc(top.bName)} <span class="seed-badge">${proj.cut + 1 - slot.slot}</span></td>
+                        </tr>`;
+                    }
+                    const chips = slot.options.map(o => {
+                        const pct = Math.round(o.count / proj.totalScenarios * 100);
+                        return `<span class="proj-chip possible">${esc(o.aName)} vs ${esc(o.bName)} <span class="proj-pct">${pct}%</span></span>`;
+                    }).join('');
+                    return `<tr><td colspan="3" style="padding:0.2rem 0"><span class="seed-badge">${slot.slot}</span> ${chips}</td></tr>`;
+                }).join('');
+                container.innerHTML = `<table style="table-layout:auto;width:100%"><tbody>${rows}</tbody></table>
+                    <p class="route-intro" style="margin-top:0.5rem">Seeds based on Swiss standings — tiebreakers may shift positions.</p>`;
+
+            } else if (proj.type === 'knockout-next') {
+                if (proj.certain) {
+                    titleEl.textContent = 'Next Knockout Round';
+                    const rows = proj.pairings.map(p =>
+                        `<tr>
+                            <td style="text-align:right;font-weight:500;padding-right:0.5rem"><span class="seed-badge">${p.aSeed}</span> ${esc(p.aName)}</td>
+                            <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.5rem;white-space:nowrap">vs</td>
+                            <td style="font-weight:500">${esc(p.bName)} <span class="seed-badge">${p.bSeed}</span></td>
+                        </tr>`
+                    ).join('');
+                    container.innerHTML = `<table style="table-layout:auto"><tbody>${rows}</tbody></table>`;
+                } else {
+                    titleEl.innerHTML = `Next Knockout Round <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios} scenario${proj.totalScenarios !== 1 ? 's' : ''}</span>`;
+                    const rows = proj.rows.map(row =>
+                        `<tr>
+                            <td style="text-align:right;font-weight:500;padding-right:0.5rem;white-space:nowrap"><span class="seed-badge">${row.seed}</span> ${esc(row.name)}</td>
+                            <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.35rem;white-space:nowrap">vs</td>
+                            <td style="padding:0.15rem 0">${row.opps.map(o => oppChipHTML(o, row.totalScenarios)).join('')}</td>
+                        </tr>`
+                    ).join('');
+                    container.innerHTML = `<table style="table-layout:auto"><tbody>${rows}</tbody></table>`;
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
         //  Event info bar
         // ═══════════════════════════════════════════════════════════
         function renderEventInfoBar() {
@@ -1238,6 +1643,7 @@
             renderEventInfoBar();
             renderStandings();
             renderLatestRoundMatches();
+            renderNextRoundProjection();
             updateStatusBar();
 
             if (!isEventComplete) {
@@ -1294,6 +1700,7 @@
                 renderEventInfoBar();
                 renderStandings();
                 renderLatestRoundMatches();
+                renderNextRoundProjection();
                 updateStatusBar();
 
                 if (!isEventComplete) {
