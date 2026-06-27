@@ -965,6 +965,34 @@ tr.cut-divider td {
     font-size: 0.875rem;
 }
 
+/* ── Standings nav arrow buttons ── */
+.nav-arrow-btn {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    color: #475569;
+    border-radius: 5px;
+    width: 1.75rem;
+    height: 1.75rem;
+    font-size: 0.7rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, border-color 0.15s;
+    padding: 0;
+    flex-shrink: 0;
+}
+
+.nav-arrow-btn:hover:not(:disabled) {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
+.nav-arrow-btn:disabled {
+    opacity: 0.35;
+    cursor: default;
+}
+
 /* ── Knockout bracket note ── */
 .ko-note {
     font-size: 0.82rem;

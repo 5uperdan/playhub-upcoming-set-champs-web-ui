@@ -72,6 +72,11 @@
                 <div class="section-header">
                     <h2>Standings</h2>
                     <span class="section-note" id="standings-note"></span>
+                    <div id="standings-nav" style="display:none;margin-left:auto;display:none;align-items:center;gap:0.3rem">
+                        <button id="standings-prev-btn" class="nav-arrow-btn" title="Previous round">◀</button>
+                        <span id="standings-nav-label" style="font-size:0.82rem;color:#475569;white-space:nowrap;min-width:7rem;text-align:center"></span>
+                        <button id="standings-next-btn" class="nav-arrow-btn" title="Next round / current">▶</button>
+                    </div>
                 </div>
                 <div class="table-wrap">
                     <div id="standings-container">
@@ -152,6 +157,7 @@
 
         let isEventComplete = false;
         let activeRoutePlayerId = null;
+        let standingsRoundIdx = null; // null = live/current; number = index into rounds-with-matches array
 
         let pollTimer = null;
         let nextPollAt = null;
@@ -616,18 +622,54 @@
             const allMatches = getAllMatches();
             const cut = topCutSize(registrationCount);
 
-            // Build standings from all completed Swiss match data
-            const standings = computeStandings(allMatches, allPlayerIds, playerNames);
+            // ── Round navigator ──────────────────────────────────────
+            // Build the list of rounds that have at least one finished match
+            const roundsWithMatches = rounds.filter(r =>
+                (matchesByRound[r.id] ?? []).some(m => m.isFinished)
+            );
+            const navEl = document.getElementById('standings-nav');
+            const totalSwissRounds = rounds.filter(r => r.isSwiss).length;
+
+            if (roundsWithMatches.length >= 2) {
+                navEl.style.display = 'flex';
+                // Clamp index in case rounds have been added since it was set
+                if (standingsRoundIdx !== null && standingsRoundIdx >= roundsWithMatches.length) {
+                    standingsRoundIdx = null;
+                }
+                const isHistorical = standingsRoundIdx !== null;
+                const label = isHistorical
+                    ? `After ${roundsWithMatches[standingsRoundIdx].name}`
+                    : 'Current';
+                document.getElementById('standings-nav-label').textContent = label;
+                document.getElementById('standings-prev-btn').disabled = standingsRoundIdx === 0;
+                document.getElementById('standings-next-btn').disabled = !isHistorical;
+            } else {
+                navEl.style.display = 'none';
+            }
+
+            // ── Decide which matches to use ──────────────────────────
+            const isHistoricalView = standingsRoundIdx !== null;
+            let matchesForStandings;
+            if (isHistoricalView) {
+                const includedRoundIds = new Set(
+                    roundsWithMatches.slice(0, standingsRoundIdx + 1).map(r => r.id)
+                );
+                matchesForStandings = allMatches.filter(m => m.isFinished && includedRoundIds.has(m.roundId));
+            } else {
+                matchesForStandings = allMatches;
+            }
+
+            // Build standings
+            const standings = computeStandings(matchesForStandings, allPlayerIds, playerNames);
             sortStandings(standings);
 
-            // Determine current-round status per player
+            // Determine current-round status per player (live view only)
             const currentRnd = latestSwissRoundInfo();
-            const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
+            const currentMatches = (!isHistoricalView && currentRnd) ? (matchesByRound[currentRnd.id] ?? []) : [];
             const doneIds = new Set();
             const playingIds = new Set();
             for (const m of currentMatches) {
                 if (m.isBye) {
-                    // Bye counts as an immediate win — mark the player as done
                     if (m.playerAId != null) doneIds.add(m.playerAId);
                     continue;
                 }
@@ -647,27 +689,22 @@
             }
 
             const hasUnfinished = currentMatches.some(m => !m.isFinished && !m.isBye);
-            const showRouteBtn = !isEventComplete && cut > 0;
-
-            // Determine how many total Swiss rounds exist
-            const totalSwissRounds = rounds.filter(r => r.isSwiss).length;
-            const currentRoundNum = currentRnd ? (rounds.indexOf(currentRnd) + 1) : 0;
+            const showRouteBtn = !isEventComplete && !isHistoricalView && cut > 0;
 
             // Update the note text
             const noteEl = document.getElementById('standings-note');
-            if (isEventComplete) {
+            if (isHistoricalView) {
+                noteEl.textContent = '';
+            } else if (isEventComplete) {
                 noteEl.textContent = 'Final results';
             } else {
-                // Find the latest elim round with any matches
                 let latestElimRnd = null;
                 for (const rnd of rounds) {
                     if (!rnd.isSwiss && (matchesByRound[rnd.id] ?? []).length > 0) latestElimRnd = rnd;
                 }
-
                 if (latestElimRnd) {
                     const elimMatches = (matchesByRound[latestElimRnd.id] ?? []).filter(m => !m.isBye);
-                    const elimUnfinished = elimMatches.some(m => !m.isFinished);
-                    const statusPart = elimUnfinished ? 'in progress' : 'complete';
+                    const statusPart = elimMatches.some(m => !m.isFinished) ? 'in progress' : 'complete';
                     noteEl.textContent = `${latestElimRnd.name} ${statusPart} · Swiss standings frozen`;
                 } else if (currentRnd) {
                     const statusPart = hasUnfinished ? 'in progress' : 'complete';
@@ -710,29 +747,26 @@
                     : '';
                 const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${routeBtn}</span></td>`;
 
-                // Determine row background based on KO/round status
-                // Swiss is "done" when the last Swiss round has all non-bye matches finished
-                const lastSwissRnd = latestSwissRoundInfo();
-                const lastSwissComplete = lastSwissRnd != null &&
-                    (matchesByRound[lastSwissRnd.id] ?? []).filter(m => !m.isBye).every(m => m.isFinished);
-                const koRounds = rounds.filter(r => !r.isSwiss);
-                const koStarted = koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0);
-                // Show elimination shading as soon as Swiss is complete (cut is now locked)
-                const showElimShading = !isEventComplete && cut > 0 && (koStarted || lastSwissComplete);
-
-                // Players eliminated in KO: lost a finished non-Swiss match
-                const isKoEliminated = showElimShading && koStarted && getAllMatches().some(
-                    m => !m.isSwiss && m.isFinished && !m.isDraw &&
-                        m.winnerId != null && m.winnerId !== s.playerId &&
-                        (m.playerAId === s.playerId || m.playerBId === s.playerId)
-                );
-                // Players who didn't make the cut
-                const missedCut = showElimShading && idx >= cut;
-
-                const isDone = !isEventComplete && !showElimShading && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
-                const rowBg = (isKoEliminated || missedCut) ? 'background:#fff1f2'
-                    : isDone ? 'background:#f0fdf4'
+                // Determine row background — simplified for historical view
+                let rowBg = '';
+                if (!isHistoricalView) {
+                    const lastSwissRnd = latestSwissRoundInfo();
+                    const lastSwissComplete = lastSwissRnd != null &&
+                        (matchesByRound[lastSwissRnd.id] ?? []).filter(m => !m.isBye).every(m => m.isFinished);
+                    const koRounds = rounds.filter(r => !r.isSwiss);
+                    const koStarted = koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0);
+                    const showElimShading = !isEventComplete && cut > 0 && (koStarted || lastSwissComplete);
+                    const isKoEliminated = showElimShading && koStarted && getAllMatches().some(
+                        m => !m.isSwiss && m.isFinished && !m.isDraw &&
+                            m.winnerId != null && m.winnerId !== s.playerId &&
+                            (m.playerAId === s.playerId || m.playerBId === s.playerId)
+                    );
+                    const missedCut = showElimShading && idx >= cut;
+                    const isDone = !isEventComplete && !showElimShading && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
+                    rowBg = (isKoEliminated || missedCut) ? 'background:#fff1f2'
+                        : isDone ? 'background:#f0fdf4'
                         : '';
+                }
 
                 // Final position cell (complete tournament only)
                 let finalPosCell = '';
@@ -1723,7 +1757,7 @@
             pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
-            isEventComplete = false; activeRoutePlayerId = null;
+            isEventComplete = false; activeRoutePlayerId = null; standingsRoundIdx = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
             document.title = 'Watch Event — Set Championships';
 
@@ -1801,6 +1835,27 @@
                 eventId = null;
                 showEntryScreen();
                 document.getElementById('entry-url-input').focus();
+            });
+
+            // Wire standings nav arrows
+            document.getElementById('standings-prev-btn').addEventListener('click', () => {
+                const rwm = rounds.filter(r => (matchesByRound[r.id] ?? []).some(m => m.isFinished));
+                if (standingsRoundIdx === null) {
+                    standingsRoundIdx = rwm.length - 1;
+                } else {
+                    standingsRoundIdx = Math.max(0, standingsRoundIdx - 1);
+                }
+                renderStandings();
+            });
+            document.getElementById('standings-next-btn').addEventListener('click', () => {
+                if (standingsRoundIdx === null) return;
+                const rwm = rounds.filter(r => (matchesByRound[r.id] ?? []).some(m => m.isFinished));
+                if (standingsRoundIdx >= rwm.length - 1) {
+                    standingsRoundIdx = null;
+                } else {
+                    standingsRoundIdx++;
+                }
+                renderStandings();
             });
 
             // Wire refresh button (delegated — button exists throughout app lifetime)
