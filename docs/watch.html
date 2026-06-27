@@ -796,8 +796,9 @@
 
             const matches = matchesByRound[displayRound.id] ?? [];
             const nonBye = matches.filter(m => !m.isBye);
+            const byeMatches = matches.filter(m => m.isBye);
 
-            if (nonBye.length === 0) {
+            if (nonBye.length === 0 && byeMatches.length === 0) {
                 section.style.display = 'none';
                 return;
             }
@@ -838,6 +839,23 @@
                     return `<tr>${tableCell}${resultHtml}</tr>`;
                 }).join('');
 
+            const byeRows = byeMatches
+                .slice()
+                .sort((a, b) => {
+                    const na = (a.playerAId != null ? playerNames[a.playerAId] : null) ?? a.playerAName;
+                    const nb = (b.playerAId != null ? playerNames[b.playerAId] : null) ?? b.playerAName;
+                    return na.localeCompare(nb);
+                })
+                .map(m => {
+                    const aName = (m.playerAId != null ? playerNames[m.playerAId] : null) ?? m.playerAName;
+                    return `<tr>
+                        <td></td>
+                        <td style="text-align:right;color:#94a3b8">${esc(aName)}</td>
+                        <td style="text-align:center;font-size:0.75rem;font-weight:600;color:#94a3b8;letter-spacing:0.05em">BYE</td>
+                        <td></td>
+                    </tr>`;
+                }).join('');
+
             const allDone = nonBye.every(m => m.isFinished);
             const inProgressCount = nonBye.filter(m => !m.isFinished).length;
             const note = allDone
@@ -854,7 +872,7 @@
                     <th style="text-align:center">Score</th>
                     <th style="text-align:left">Player</th>
                 </tr></thead>
-                <tbody>${rows}</tbody>
+                <tbody>${rows}${byeRows}</tbody>
             </table>`;
         }
         function toggleRoutePanel(playerId, standings, cut) {
