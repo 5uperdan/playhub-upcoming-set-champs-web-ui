@@ -205,12 +205,20 @@
         async function apiFetchRoundMatches(roundId) {
             // The non-paginated /matches/ endpoint returns 401 (Cloudflare hydraproxy
             // restriction). Always use the paginated endpoint and collect all pages.
+            // A 404 means the round exists in the event structure but hasn't started
+            // yet — treat it as empty rather than a hard failure.
             const all = [];
             let page = 1;
             while (true) {
-                const data = await phFetch(
-                    `/tournament-rounds/${roundId}/matches/paginated/?page=${page}&page_size=100&avoid_cache=false`
-                );
+                let data;
+                try {
+                    data = await phFetch(
+                        `/tournament-rounds/${roundId}/matches/paginated/?page=${page}&page_size=100&avoid_cache=false`
+                    );
+                } catch (err) {
+                    if (err.message.startsWith('API error 404')) return all;
+                    throw err;
+                }
                 const results = data.results ?? [];
                 all.push(...results);
                 if (!data.next_page_number) break;
