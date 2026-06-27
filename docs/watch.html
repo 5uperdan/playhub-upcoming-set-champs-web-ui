@@ -1287,7 +1287,7 @@
                 return { type: 'knockout-next', pairings, certain: true };
             }
 
-            // Enumerate unfinished KO match outcomes
+            // Enumerate unfinished KO match outcomes — build per-slot pairing options
             const MAX = 8;
             const capped = koUnfinished.slice(0, MAX);
             const total = Math.pow(2, capped.length);
@@ -1296,7 +1296,8 @@
                     .map(m => m.winnerId === m.playerAId ? m.playerBId : m.playerAId).filter(Boolean)
             );
 
-            const koOppMap = new Map();
+            // slotMap: bracket slot index -> Map<"aId:bId", {aName,bName,aSeed,bSeed,count}>
+            const slotMap = new Map();
             for (let mask = 0; mask < total; mask++) {
                 const extraLosers = new Set(alreadyLost);
                 for (let i = 0; i < capped.length; i++) {
@@ -1306,28 +1307,26 @@
                 }
                 const survivors = getSurvivors(extraLosers);
                 if (survivors.length < 2) continue;
-                for (let i = 0; i < survivors.length / 2; i++) {
-                    const aId = survivors[i], bId = survivors[survivors.length - 1 - i];
-                    for (const [pid, oppId] of [[aId, bId], [bId, aId]]) {
-                        if (!koOppMap.has(pid)) koOppMap.set(pid, new Map());
-                        koOppMap.get(pid).set(oppId, (koOppMap.get(pid).get(oppId) ?? 0) + 1);
-                    }
+                for (let si = 0; si < Math.floor(survivors.length / 2); si++) {
+                    const aId = survivors[si], bId = survivors[survivors.length - 1 - si];
+                    const key = `${aId}:${bId}`;
+                    if (!slotMap.has(si)) slotMap.set(si, new Map());
+                    const sm = slotMap.get(si);
+                    const prev = sm.get(key);
+                    sm.set(key, prev
+                        ? { ...prev, count: prev.count + 1 }
+                        : { aId, bId, aName: nameOf(aId), bName: nameOf(bId), aSeed: seedMap.get(aId) ?? '?', bSeed: seedMap.get(bId) ?? '?', count: 1 }
+                    );
                 }
             }
 
-            const shown = new Set();
-            const rows = [];
-            for (const pid of [...koOppMap.keys()].sort((a, b) => (seedMap.get(a) ?? 999) - (seedMap.get(b) ?? 999))) {
-                if (shown.has(pid)) continue;
-                shown.add(pid);
-                const opps = [...koOppMap.get(pid).entries()]
-                    .map(([id, count]) => ({ id, name: nameOf(id), seed: seedMap.get(id) ?? '?', count }))
-                    .sort((a, b) => b.count - a.count);
-                for (const o of opps) shown.add(o.id);
-                rows.push({ playerId: pid, name: nameOf(pid), seed: seedMap.get(pid) ?? '?', opps, totalScenarios: total });
-            }
+            const slots = [...slotMap.entries()]
+                .sort((a, b) => a[0] - b[0])
+                .map(([, optMap]) => ({
+                    options: [...optMap.values()].sort((a, b) => b.count - a.count)
+                }));
 
-            return { type: 'knockout-next', rows, certain: false, totalScenarios: total, unfinishedCount: koUnfinished.length };
+            return { type: 'knockout-next', slots, certain: false, totalScenarios: total, unfinishedCount: koUnfinished.length };
         }
 
         function computeNextRoundProjection() {
@@ -1416,14 +1415,23 @@
                     container.innerHTML = `<table style="table-layout:auto"><tbody>${rows}</tbody></table>`;
                 } else {
                     titleEl.innerHTML = `Next Knockout Round <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios} scenario${proj.totalScenarios !== 1 ? 's' : ''}</span>`;
-                    const rows = proj.rows.map(row =>
-                        `<tr>
-                            <td style="text-align:right;font-weight:500;padding-right:0.5rem;white-space:nowrap"><span class="seed-badge">${row.seed}</span> ${esc(row.name)}</td>
-                            <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.35rem;white-space:nowrap">vs</td>
-                            <td style="padding:0.15rem 0">${row.opps.map(o => oppChipHTML(o, row.totalScenarios)).join('')}</td>
-                        </tr>`
-                    ).join('');
-                    container.innerHTML = `<table style="table-layout:auto"><tbody>${rows}</tbody></table>`;
+                    const rows = proj.slots.map((slot, idx) => {
+                        const top = slot.options[0];
+                        if (top.count === proj.totalScenarios) {
+                            return `<tr>
+                                <td style="text-align:right;font-weight:500;padding-right:0.5rem"><span class="seed-badge">${top.aSeed}</span> ${esc(top.aName)}</td>
+                                <td style="color:#94a3b8;font-size:0.78rem;padding:0 0.5rem;white-space:nowrap">vs</td>
+                                <td style="font-weight:500"><span class="seed-badge">${top.bSeed}</span> ${esc(top.bName)}</td>
+                            </tr>`;
+                        }
+                        const label = proj.slots.length === 1 ? 'Final' : `Match ${idx + 1}`;
+                        const chips = slot.options.map(o => {
+                            const pct = Math.round(o.count / proj.totalScenarios * 100);
+                            return `<span class="proj-chip possible"><span class="seed-badge">${o.aSeed}</span> ${esc(o.aName)} vs <span class="seed-badge">${o.bSeed}</span> ${esc(o.bName)} <span class="proj-pct">${pct}%</span></span>`;
+                        }).join('');
+                        return `<tr><td colspan="3" style="padding:0.2rem 0"><span style="font-size:0.78rem;color:#94a3b8;margin-right:0.4rem">${label}:</span>${chips}</td></tr>`;
+                    }).join('');
+                    container.innerHTML = `<table style="table-layout:auto;width:100%"><tbody>${rows}</tbody></table>`;
                 }
             }
         }
