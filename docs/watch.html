@@ -179,6 +179,8 @@
         // Full 6-outcome tree cached here; draw toggles filter from memory without recomputing.
         // Invalidated when the capped unfinished match set changes (new round, match set shifts).
         let projectionCache = null; // { cacheKey: string, rawProj: object }
+        // Last render fingerprint — skip re-render when match data and draw flags haven't changed.
+        let lastProjectionRenderKey = null;
 
         let pollTimer = null;
         let nextPollAt = null;
@@ -1127,11 +1129,13 @@
         const SWISS_DRAW_11 = { aScore: 1, bScore: 1, isDraw: true, aWins: null, label: 'D1-1' };
         const SWISS_DRAW_00 = { aScore: 0, bScore: 0, isDraw: true, aWins: null, label: 'D0-0' };
         const ALL_SWISS_OUTCOMES = [...SWISS_WIN_OUTCOMES, SWISS_DRAW_11, SWISS_DRAW_00]; // always 6
+        const POW6 = [1, 6, 36, 216, 1296, 7776]; // precomputed powers of 6 for mask decoding (max 6 positions)
 
         // Enumerate all 6^n scenarios for unfinished Swiss matches.
         // Returns possibleOpponents: Map<playerId, Map<oppId|'bye', {id, name, count, scenarios, ambiguousScenarios}>>
         // ambiguousScenarios: Set of masks where standings had a genuine tiebreak (tied on all 4 real TB)
-        function enumerateSwissScenarios(cappedUnfinished, baseFinished, totalScenarios) {
+        function enumerateSwissScenarios(cappedUnfinished, baseFinished) {
+            const totalScenarios = Math.pow(6, cappedUnfinished.length);
             const possibleOpponents = new Map();
             const addOpp = (pid, oppKey, oppName, oppId, mask, isAmbiguous) => {
                 if (!possibleOpponents.has(pid)) possibleOpponents.set(pid, new Map());
@@ -1143,11 +1147,16 @@
                 if (isAmbiguous) entry.ambiguousScenarios.add(mask);
             };
 
+            // Opponent pairings are the same in every scenario (only outcomes differ),
+            // so pre-compute history and bye recipients once rather than 6^n times.
+            const fixedOppHistory = buildOpponentHistory([...baseFinished, ...cappedUnfinished]);
+            const fixedByeRec = buildByeRecipients(baseFinished); // cappedUnfinished is pre-filtered !isBye
+
             for (let mask = 0; mask < totalScenarios; mask++) {
                 const hypo = [...baseFinished];
                 for (let i = 0; i < cappedUnfinished.length; i++) {
                     const m = cappedUnfinished[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / Math.pow(6, i)) % 6];
+                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
                     hypo.push({
                         ...m, isFinished: true, isDraw: outcome.isDraw,
                         winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
@@ -1162,9 +1171,7 @@
                     Math.abs(s.omw - standings[i-1].omw) < 1e-9 &&
                     Math.abs(s.gw - standings[i-1].gw) < 1e-9 &&
                     Math.abs(s.ogw - standings[i-1].ogw) < 1e-9);
-                const { pairings, byeId } = swissPairAlgorithm(
-                    standings, buildOpponentHistory(hypo), buildByeRecipients(hypo)
-                );
+                const { pairings, byeId } = swissPairAlgorithm(standings, fixedOppHistory, fixedByeRec);
                 for (const p of pairings) {
                     addOpp(p.aId, p.bId, p.bName, p.bId, mask, hasTie);
                     addOpp(p.bId, p.aId, p.aName, p.aId, mask, hasTie);
@@ -1185,7 +1192,7 @@
             const need11 = drawInclude11, need00 = drawInclude00;
             const isValid = mask => {
                 for (let i = 0; i < n; i++) {
-                    const d = Math.floor(mask / Math.pow(6, i)) % 6;
+                    const d = Math.floor(mask / POW6[i]) % 6;
                     if (d === 4 && !need11) return false;
                     if (d === 5 && !need00) return false;
                 }
@@ -1211,7 +1218,7 @@
         }
 
         // Return the match outcomes that are the same across every scenario in the set.
-        // base=5: Swiss (5-outcome quinary encoding). base=2: KO (binary win/loss).
+        // base=6: Swiss (always base-6 encoded masks). base=2: KO (binary win/loss).
         function getRequiredConditions(scenarios, unfinishedMatches, base) {
             if (!scenarios.length || !unfinishedMatches.length) return [];
             const required = [];
@@ -1225,8 +1232,8 @@
                     if (allA) required.push(`${aName} beats ${bName}`);
                     else if (allB) required.push(`${bName} beats ${aName}`);
                 } else {
-                    const pBi = Math.pow(base, i);
-                    const digits = scenarios.map(s => Math.floor(s / pBi) % base);
+                    // base is always 6 for Swiss — use pre-computed powers
+                    const digits = scenarios.map(s => Math.floor(s / POW6[i]) % 6);
                     const all = (...ds) => digits.every(d => ds.includes(d));
                     if      (all(0))      required.push(`${aName} beats ${bName} 2-0`);
                     else if (all(1))      required.push(`${aName} beats ${bName} 2-1`);
@@ -1260,7 +1267,7 @@
 
             const total = Math.pow(6, capped.length);
             const base = allMatches.filter(m => m.isFinished);
-            const possOpp = enumerateSwissScenarios(capped, base, total);
+            const possOpp = enumerateSwissScenarios(capped, base);
             const displayStandings = computeStandings(base, allPlayerIds, playerNames);
             sortStandings(displayStandings);
 
@@ -1313,7 +1320,7 @@
                 const hypo = [...base];
                 for (let i = 0; i < capped.length; i++) {
                     const m = capped[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / Math.pow(6, i)) % 6];
+                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
                     hypo.push({
                         ...m, isFinished: true, isDraw: outcome.isDraw,
                         winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
@@ -1354,7 +1361,9 @@
                     }
                 }
             }
-            const standingsOrder = new Map(computeStandings(base, allPlayerIds, playerNames).map((s, i) => [s.playerId, i]));
+            const sortedForOrder = computeStandings(base, allPlayerIds, playerNames);
+            sortStandings(sortedForOrder);
+            const standingsOrder = new Map(sortedForOrder.map((s, i) => [s.playerId, i]));
             const players = [...playerMap.entries()]
                 .map(([pid, { name, oppMap }]) => ({
                     playerId: pid, name,
@@ -1419,6 +1428,7 @@
                     players.push({ playerId: aId, name: nameOf(aId), seed: aSeed, opponents: [{ id: bId, name: nameOf(bId), seed: bSeed, count: 1, scenarios: [] }] });
                     players.push({ playerId: bId, name: nameOf(bId), seed: bSeed, opponents: [{ id: aId, name: nameOf(aId), seed: aSeed, count: 1, scenarios: [] }] });
                 }
+                players.sort((a, b) => (seedMap.get(a.playerId) ?? 999) - (seedMap.get(b.playerId) ?? 999));
                 return { type: 'knockout-next', certain: true, totalScenarios: 1, scenarioBase: 2, unfinishedMatches: [], players };
             }
 
@@ -1500,23 +1510,31 @@
 
         function renderProjectionPlayer(player, proj) {
             const { totalScenarios, unfinishedMatches } = proj;
+            // For Swiss every player appears in every scenario, so playerTotal === totalScenarios.
+            // For KO, a player only appears in scenarios where they advance — use that as denominator
+            // so that opponent counts sum correctly and the "x of y" chips are meaningful.
+            const playerTotal = player.opponents.reduce((s, o) => s + o.count, 0);
             const seedBadge = player.seed != null ? `<span class="seed-badge" style="margin-right:0.3rem">${player.seed}</span>` : '';
-            const certain = player.opponents.length === 1 && player.opponents[0].count === totalScenarios;
+            const isKO = proj.type !== 'swiss';
+            const advances = isKO && playerTotal < totalScenarios
+                ? ` <span class="proj-player-meta" style="font-size:0.78rem;color:#64748b">advances in ${playerTotal} of ${totalScenarios}</span>`
+                : '';
+            const certain = player.opponents.length === 1 && player.opponents[0].count === playerTotal;
             const meta = certain
                 ? `vs ${esc(player.opponents[0].name)}`
                 : `${player.opponents.length} possible opponent${player.opponents.length !== 1 ? 's' : ''}`;
 
             const oppItems = player.opponents.map(opp => {
-                const countTag = opp.count === totalScenarios
+                const countTag = opp.count === playerTotal
                     ? `<span class="proj-chip certain" style="margin-left:0.4rem">Certain</span>`
-                    : `<span class="proj-chip possible" style="margin-left:0.4rem">${opp.count} of ${totalScenarios}</span>`;
+                    : `<span class="proj-chip possible" style="margin-left:0.4rem">${opp.count} of ${playerTotal}</span>`;
                 const ambiguousCount = opp.ambiguousCount ?? 0;
                 const tiebreakTag = ambiguousCount > 0
                     ? `<span class="proj-chip tiebreak" title="${ambiguousCount} of ${opp.count} scenario${opp.count !== 1 ? 's' : ''} involve a standings tie — actual pairing may differ">⚖ tiebreak</span>`
                     : '';
                 const oppSeedBadge = opp.seed != null ? `<span class="seed-badge" style="margin-right:0.3rem">${opp.seed}</span>` : '';
 
-                if (!unfinishedMatches.length || opp.count === totalScenarios) {
+                if (!unfinishedMatches.length || opp.count === playerTotal) {
                     return `<div class="proj-opp-simple">${oppSeedBadge}${esc(opp.name)}${countTag}${tiebreakTag}</div>`;
                 }
 
@@ -1532,7 +1550,7 @@
             }).join('');
 
             return `<details class="proj-player">
-                <summary>${seedBadge}<span class="proj-player-name">${esc(player.name)}</span><span class="proj-player-meta">${meta}</span></summary>
+                <summary>${seedBadge}<span class="proj-player-name">${esc(player.name)}</span><span class="proj-player-meta">${meta}</span>${advances}</summary>
                 <div class="proj-player-body">${oppItems}</div>
             </details>`;
         }
@@ -1557,10 +1575,26 @@
             if (d00) d00.checked = drawInclude00;
 
             if (!projectionEnabled) {
-                titleEl.textContent = 'Next Round Projection';
-                container.innerHTML = '<div class="proj-placeholder">Tick "Calculate pairings" to see possible opponents and required results</div>';
+                if (lastProjectionRenderKey !== 'disabled') {
+                    lastProjectionRenderKey = 'disabled';
+                    titleEl.textContent = 'Next Round Projection';
+                    container.innerHTML = '<div class="proj-placeholder">Tick "Calculate pairings" to see possible opponents and required results</div>';
+                }
                 return;
             }
+
+            // Build a fingerprint from the inputs that affect projection output.
+            // If nothing changed since the last render, skip to preserve open accordion state.
+            const swissRnd = latestSwissRoundInfo();
+            const koRnds = rounds.filter(r => !r.isSwiss && (matchesByRound[r.id] ?? []).length > 0);
+            const latestKoRnd = koRnds.length > 0 ? koRnds[koRnds.length - 1] : null;
+            const renderKey = [
+                swissRnd?.id ?? '', roundFingerprints[swissRnd?.id] ?? '',
+                latestKoRnd?.id ?? '', roundFingerprints[latestKoRnd?.id] ?? '',
+                drawInclude11, drawInclude00
+            ].join('|');
+            if (renderKey === lastProjectionRenderKey) return;
+            lastProjectionRenderKey = renderKey;
 
             // Show loading immediately, defer heavy computation so the browser can repaint first
             titleEl.textContent = 'Next Round Projection';
@@ -1929,7 +1963,7 @@
             pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
-            isEventComplete = false; activeRoutePlayerId = null; standingsRoundIdx = null; projectionEnabled = false; projectionCache = null;
+            isEventComplete = false; activeRoutePlayerId = null; standingsRoundIdx = null; projectionEnabled = false; projectionCache = null; lastProjectionRenderKey = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
             document.title = 'Watch Event — Set Championships';
 
