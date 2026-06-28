@@ -550,70 +550,130 @@
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Route to top cut: enumerate scenarios for unfinished matches
+        //  Route to top cut: project all remaining Swiss rounds
         // ═══════════════════════════════════════════════════════════
-        function findRoutes(targetPlayerId, cutSize, maxRoutes = 3) {
+
+        // Multi-round DFS: enumerates outcomes of all remaining Swiss rounds, projecting
+        // future rounds' pairings via swissPairAlgorithm (same algorithm as pairings projection).
+        // Returns { routes, noRound, noUnfinished, searchedWithDraws, hitNodeCap }
+        // Each route: [{ round, isProjected, items: [{match, result}] }]
+        // Current-round segments include all unfinished match results; projected segments include only
+        // the target player's match (opponent determined by simulated pairings).
+        function findRoutesAllSwiss(playerId, cut) {
+            const swissRounds = rounds.filter(r => r.isSwiss);
             const currentRnd = latestSwissRoundInfo();
-            if (!currentRnd) return { routes: [], unfinished: [], noRound: true };
+            if (!currentRnd) return { routes: [], noRound: true };
 
-            const currentMatches = matchesByRound[currentRnd.id] ?? [];
-            const unfinished = currentMatches.filter(m => !m.isFinished && !m.isBye);
+            const currentIdx = swissRounds.indexOf(currentRnd);
+            const allMatches = getAllMatches();
+            const baseFinished = allMatches.filter(m => m.isFinished);
+            const remainingRounds = swissRounds.slice(currentIdx);
 
-            if (unfinished.length === 0) {
-                return { routes: [], unfinished: [], noUnfinished: true };
+            // Swiss is complete when the last known round has no unfinished matches
+            const currentRndMatches = matchesByRound[currentRnd.id] ?? [];
+            if (currentIdx === swissRounds.length - 1 &&
+                !currentRndMatches.some(m => !m.isFinished && !m.isBye)) {
+                return { routes: [], noUnfinished: true };
             }
 
-            // Base: all finished matches (across all rounds)
-            const baseMatches = getAllMatches().filter(m => m.isFinished);
+            const MAX_ROUTES = 3;
+            const MAX_NODES = 100_000;
+            let nodesVisited = 0;
+            let hitNodeCap = false;
+            const routes = [];
 
-            // Try without draws first; if no route found, try with draws
-            for (const includeDraws of [false, true]) {
-                const numOutcomes = includeDraws ? 3 : 2;
-                const total = Math.pow(numOutcomes, unfinished.length);
-                const routes = [];
+            const initialOppHist = buildOpponentHistory(allMatches);
+            const initialByeRec = buildByeRecipients(baseFinished);
 
-                for (let mask = 0; mask < total && routes.length < maxRoutes; mask++) {
-                    // Decode mask: index i uses digit (mask / numOutcomes^i) % numOutcomes
-                    // 0 = player A wins, 1 = player B wins, 2 = draw
-                    const matchOutcomes = unfinished.map((_, i) =>
-                        Math.floor(mask / Math.pow(numOutcomes, i)) % numOutcomes
-                    );
+            function dfs(rndIdx, finished, oppHist, byeRec, path, useDraws) {
+                if (routes.length >= MAX_ROUTES || hitNodeCap) return;
+                if (++nodesVisited > MAX_NODES) { hitNodeCap = true; return; }
 
-                    // Build hypothetical match list
-                    const hypoMatches = [...baseMatches];
-                    for (let i = 0; i < unfinished.length; i++) {
-                        const m = unfinished[i];
-                        const outcome = matchOutcomes[i];
-                        let winnerId, isDraw, paScore, pbScore;
-                        if (outcome === 0) {
-                            winnerId = m.playerAId; isDraw = false; paScore = 2; pbScore = 0;
-                        } else if (outcome === 1) {
-                            winnerId = m.playerBId; isDraw = false; paScore = 0; pbScore = 2;
-                        } else {
-                            winnerId = null; isDraw = true; paScore = 1; pbScore = 1;
-                        }
-                        hypoMatches.push({
-                            ...m, winnerId, isDraw, isFinished: true,
-                            playerAScore: paScore, playerBScore: pbScore
-                        });
-                    }
-
-                    // Compute and sort standings from hypothetical matches
-                    const hypoStandings = computeStandings(hypoMatches, allPlayerIds, playerNames);
-                    sortStandings(hypoStandings);
-
-                    const targetIdx = hypoStandings.findIndex(s => s.playerId === targetPlayerId);
-                    if (cutSize > 0 && targetIdx >= 0 && targetIdx < cutSize) {
-                        routes.push({ matchOutcomes, unfinished: [...unfinished] });
-                    }
+                if (rndIdx >= remainingRounds.length) {
+                    const standings = computeStandings(finished, allPlayerIds, playerNames);
+                    sortStandings(standings);
+                    const rank = standings.findIndex(s => s.playerId === playerId);
+                    if (rank >= 0 && rank < cut) routes.push(path);
+                    return;
                 }
 
-                if (routes.length > 0) {
-                    return { routes, unfinished, includeDraws };
+                const rnd = remainingRounds[rndIdx];
+                const existing = matchesByRound[rnd.id] ?? [];
+                const alreadyDone = existing.filter(m => m.isFinished);
+                const isProjectedRound = existing.length === 0;
+
+                let toEnumerate;
+                let nextByeRec = byeRec;
+
+                if (isProjectedRound) {
+                    // Future round: generate pairings from current hypothetical standings
+                    const standings = computeStandings([...finished, ...alreadyDone], allPlayerIds, playerNames);
+                    sortStandings(standings);
+                    const { pairings, byeId } = swissPairAlgorithm(standings, oppHist, byeRec);
+                    toEnumerate = pairings.map((p, i) => ({
+                        id: `proj_${rnd.id}_${i}`,
+                        playerAId: p.aId, playerAName: playerNames[p.aId] ?? 'Unknown',
+                        playerBId: p.bId, playerBName: playerNames[p.bId] ?? 'Unknown',
+                        isFinished: false, isBye: false, isSwiss: true, roundId: rnd.id,
+                    }));
+                    if (byeId != null) nextByeRec = new Set([...byeRec, byeId]);
+                } else {
+                    toEnumerate = existing.filter(m => !m.isFinished && !m.isBye);
+                }
+
+                const finishedWithDone = [...finished, ...alreadyDone];
+
+                if (toEnumerate.length === 0) {
+                    dfs(rndIdx + 1, finishedWithDone, oppHist, nextByeRec, path, useDraws);
+                    return;
+                }
+
+                const capped = toEnumerate.slice(0, 6);
+                // oppHistory for the next round is determined by pairings (fixed regardless of outcome)
+                const nextOppHist = buildOpponentHistory([...finishedWithDone, ...capped]);
+
+                // Current round: scored win/loss (or all 6 with draws).
+                // Projected rounds: binary A/B win only — scores approximate, sufficient for tiebreakers.
+                const outcomeSet = rndIdx === 0
+                    ? (useDraws ? ALL_SWISS_OUTCOMES : SWISS_WIN_OUTCOMES)
+                    : [SWISS_WIN_OUTCOMES[0], SWISS_WIN_OUTCOMES[2]]; // A 2-0, B 2-0
+                const base = outcomeSet.length;
+                const pows = Array.from({ length: capped.length }, (_, k) => Math.pow(base, k));
+
+                for (let mask = 0; mask < Math.pow(base, capped.length); mask++) {
+                    if (routes.length >= MAX_ROUTES || hitNodeCap) break;
+
+                    const newFinished = [...finishedWithDone];
+                    const segItems = [];
+
+                    for (let i = 0; i < capped.length; i++) {
+                        const m = capped[i];
+                        const outcome = outcomeSet[Math.floor(mask / pows[i]) % base];
+                        const result = {
+                            isFinished: true, isDraw: outcome.isDraw,
+                            winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
+                            playerAScore: outcome.aScore, playerBScore: outcome.bScore,
+                        };
+                        newFinished.push({ ...m, ...result });
+                        // Current round: show all matches. Projected rounds: only the player's match.
+                        const isPlayerMatch = m.playerAId === playerId || m.playerBId === playerId;
+                        if (!isProjectedRound || isPlayerMatch) segItems.push({ match: m, result });
+                    }
+
+                    const newSeg = segItems.length > 0 ? { round: rnd, isProjected: isProjectedRound, items: segItems } : null;
+                    dfs(rndIdx + 1, newFinished, nextOppHist, nextByeRec, newSeg ? [...path, newSeg] : path, useDraws);
                 }
             }
 
-            return { routes: [], unfinished };
+            dfs(0, baseFinished, initialOppHist, initialByeRec, [], false);
+            const searchedWithDraws = routes.length === 0 && !hitNodeCap;
+            if (searchedWithDraws) {
+                nodesVisited = 0;
+                hitNodeCap = false;
+                dfs(0, baseFinished, initialOppHist, initialByeRec, [], true);
+            }
+
+            return { routes, noRound: false, noUnfinished: false, searchedWithDraws, hitNodeCap };
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -963,22 +1023,22 @@
             // Find current standing rank
             const currentRank = standings.findIndex(s => s.playerId === playerId) + 1;
             if (cut > 0 && currentRank <= cut) {
-                panel.innerHTML = renderRouteHTML(targetName, null, [], false, cut, true, currentRank);
+                panel.innerHTML = renderRouteHTML(targetName, playerId, null, false, cut, true, currentRank);
                 panel.style.display = '';
                 wireRouteClose();
                 panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
                 return;
             }
 
-            const { routes, unfinished, noRound, noUnfinished, includeDraws } = findRoutes(playerId, cut);
+            const { routes, noRound, noUnfinished, searchedWithDraws, hitNodeCap } = findRoutesAllSwiss(playerId, cut);
 
-            panel.innerHTML = renderRouteHTML(targetName, unfinished, routes, includeDraws, cut, false, currentRank, noRound, noUnfinished);
+            panel.innerHTML = renderRouteHTML(targetName, playerId, routes, searchedWithDraws, cut, false, currentRank, noRound, noUnfinished, hitNodeCap);
             panel.style.display = '';
             wireRouteClose();
             panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
-        function renderRouteHTML(playerName, unfinished, routes, includeDraws, cut, alreadyIn, currentRank, noRound, noUnfinished) {
+        function renderRouteHTML(playerName, playerId, routes, searchedWithDraws, cut, alreadyIn, currentRank, noRound, noUnfinished, hitNodeCap) {
             const closeBtn = `<button class="mini-btn" id="route-close-btn">✕ Close</button>`;
 
             if (alreadyIn) {
@@ -1001,37 +1061,47 @@
             if (noUnfinished) {
                 return `<div class="route-panel">
                 <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
-                <p class="route-intro">No matches currently in progress. Check back once the next round begins.</p>
+                <p class="route-intro">Swiss rounds are complete.</p>
             </div>`;
             }
 
             if (routes.length === 0) {
+                const msg = hitNodeCap
+                    ? `Search exceeded scenario limit — no path found. (Player may still have a slim route.)`
+                    : `No path to the top ${cut} found — even considering draws.`;
                 return `<div class="route-panel">
                 <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
-                <p style="color:#dc2626;font-size:0.875rem">No path to the top ${cut} found — even considering draws.</p>
+                <p style="color:#dc2626;font-size:0.875rem">${msg}</p>
             </div>`;
             }
 
-            const introText = includeDraws
+            const introText = searchedWithDraws
                 ? `No path without draws found. These options require at least one draw:`
                 : `Showing ${routes.length > 1 ? 'up to 3 scenarios' : 'one scenario'} where <strong>${esc(playerName)}</strong> reaches the top ${cut}:`;
 
             const scenarioCards = routes.map((route, i) => {
-                const chips = route.matchOutcomes.map((outcome, j) => {
-                    const m = unfinished[j];
-                    const aName = esc(m.playerAName);
-                    const bName = esc(m.playerBName);
-                    if (outcome === 0) {
-                        return `<span class="outcome-chip win">${aName} beats ${bName}</span>`;
-                    } else if (outcome === 1) {
+                // route: [{round, isProjected, items: [{match, result}]}]
+                const roundSections = route.map(seg => {
+                    const { round, isProjected, items } = seg;
+                    const projBadge = isProjected
+                        ? ` <span class="proj-chip possible" style="font-size:0.68rem;padding:1px 5px;vertical-align:middle">projected pairing</span>`
+                        : '';
+                    const chips = items.map(({ match, result }) => {
+                        const aName = esc(playerNames[match.playerAId] ?? match.playerAName ?? '?');
+                        const bName = esc(playerNames[match.playerBId] ?? match.playerBName ?? '?');
+                        if (result.isDraw) return `<span class="outcome-chip draw">${aName} draws with ${bName}</span>`;
+                        if (result.winnerId === match.playerAId) return `<span class="outcome-chip win">${aName} beats ${bName}</span>`;
                         return `<span class="outcome-chip loss">${bName} beats ${aName}</span>`;
-                    } else {
-                        return `<span class="outcome-chip draw">${aName} draws with ${bName}</span>`;
-                    }
+                    }).join('');
+                    return `<div class="route-round-section">
+                        <div class="route-round-label">${esc(round.name)}${projBadge}</div>
+                        <div class="scenario-outcomes">${chips}</div>
+                    </div>`;
                 }).join('');
+
                 return `<div class="scenario-card">
                 <div class="scenario-label">Option ${i + 1}</div>
-                <div class="scenario-outcomes">${chips}</div>
+                ${roundSections}
             </div>`;
             }).join('');
 

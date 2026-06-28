@@ -844,6 +844,23 @@ tr.cut-divider td {
     margin-bottom: 0.35rem;
 }
 
+.route-round-section {
+    margin-top: 0.4rem;
+}
+
+.route-round-section:first-child {
+    margin-top: 0;
+}
+
+.route-round-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 0.2rem;
+}
+
 .scenario-outcomes {
     display: flex;
     flex-wrap: wrap;
