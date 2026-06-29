@@ -794,6 +794,60 @@ tr.cut-divider td {
     color: #2563eb;
 }
 
+/* ── ID button (safe-to-ID check) ── */
+.id-btn {
+    background: transparent;
+    border: 1px solid #cbd5e1;
+    border-radius: 4px;
+    color: #64748b;
+    cursor: pointer;
+    flex-shrink: 0;
+    font: inherit;
+    font-size: 0.72rem;
+    padding: 0.1rem 0.35rem;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+    vertical-align: middle;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.id-btn:hover {
+    border-color: #0891b2;
+    color: #0891b2;
+}
+
+.id-btn.active {
+    background: #ecfeff;
+    border-color: #0891b2;
+    color: #0891b2;
+}
+
+/* ── ID panel result states ── */
+.id-result-safe {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #166534;
+    margin-top: 0.5rem;
+}
+
+.id-result-unsafe {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #b45309;
+    margin-top: 0.5rem;
+}
+
+.id-unsafe-list {
+    margin: 0.5rem 0 0 1.1rem;
+    padding: 0;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+
+.id-unsafe-item {
+    color: #1e293b;
+}
+
 /* ── Route panel ── */
 .route-panel {
     background: #fff;
@@ -963,6 +1017,20 @@ tr.cut-divider td {
 .in-cut-rank {
     color: #2563eb;
     font-weight: 600;
+}
+
+.dropped-badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: #e2e8f0;
+    color: #64748b;
+    vertical-align: middle;
+    flex-shrink: 0;
 }
 
 /* ── Error screen (watch page) ── */
