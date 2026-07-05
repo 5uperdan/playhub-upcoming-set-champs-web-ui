@@ -1230,6 +1230,57 @@ tr.cut-divider td {
     margin-top: 1rem;
 }
 
+/* ── Live bracket preview ── */
+.bracket-wrap {
+    display: flex;
+    align-items: stretch;
+    gap: 1.75rem;
+    overflow-x: auto;
+    padding: 0.25rem 0.125rem 0.75rem;
+}
+
+.bracket-round {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-around;
+    gap: 0.75rem;
+    min-width: 190px;
+}
+
+.bracket-round-label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    text-align: center;
+    margin-bottom: 0.15rem;
+}
+
+.bracket-match {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.bracket-slot {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.bracket-slot:first-child {
+    border-bottom: 1px solid #f1f5f9;
+}
+
+.bracket-slot.tbd {
+    color: #94a3b8;
+    font-style: italic;
+}
+
 @media (max-width: 640px) {
     .event-info-bar {
         padding: 0.5rem 0.75rem;

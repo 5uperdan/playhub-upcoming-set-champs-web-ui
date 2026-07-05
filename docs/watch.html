@@ -171,10 +171,6 @@
         let standingsRoundIdx = null; // null = live/current; number = index into rounds-with-matches array
         let projectionEnabled = false;
         let showDrawOutcomes = true;  // single toggle: include 1-1 draw outcomes in projections
-        // Full 5-outcome tree cached here (bracket projection only); the draw toggle
-        // filters from memory without recomputing. Invalidated when the capped
-        // unfinished match set changes (new round, match set shifts).
-        let projectionCache = null; // { cacheKey: string, rawProj: object }
         // Last render fingerprint — skip re-render when match data and draw flags haven't changed.
         let lastProjectionRenderKey = null;
 
@@ -1164,63 +1160,20 @@
         const ALL_SWISS_OUTCOMES = [...SWISS_WIN_OUTCOMES, SWISS_DRAW_11]; // always 5
         const POW5 = [1, 5, 25, 125, 625, 3125]; // precomputed powers of 5 for mask decoding (max 6 positions)
 
-        // Filter a raw 5-outcome projection for the draw toggle. scenarioBase
-        // stays 5 — masks are always base-5 encoded for correct decoding.
-        function applyProjectionFilters(rawProj) {
-            const { scenarioBase, unfinishedMatches } = rawProj;
-            const n = unfinishedMatches.length;
-            if (scenarioBase !== 5 || n === 0 || showDrawOutcomes) return rawProj;
-
-            // draw toggle off: exclude any scenario containing a 1-1 draw (digit 4)
-            const isValid = mask => {
-                for (let i = 0; i < n; i++) {
-                    if (Math.floor(mask / POW5[i]) % 5 === 4) return false;
-                }
-                return true;
-            };
-            const filteredTotal = Math.pow(4, n);
-
-            const filteredPlayers = rawProj.players.map(player => ({
-                ...player,
-                opponents: player.opponents
-                    .map(opp => {
-                        const filtered = opp.scenarios.filter(isValid);
-                        const ambiguousCount = filtered.filter(m => opp.ambiguousScenarios?.has(m)).length;
-                        return { ...opp, count: filtered.length, scenarios: filtered, ambiguousCount };
-                    })
-                    .filter(opp => opp.count > 0)
-                    .sort((a, b) => b.count - a.count),
-            })).filter(p => p.opponents.length > 0);
-
-            return { ...rawProj, totalScenarios: filteredTotal, players: filteredPlayers };
-        }
-
-        // Return the match outcomes that are the same across every scenario in the set.
-        // base=5: Swiss (base-5 encoded masks). base=2: KO (binary win/loss).
-        function getRequiredConditions(scenarios, unfinishedMatches, base) {
+        // Return the match outcomes that are the same across every scenario in the
+        // set. Only used for the knockout-next path, which enumerates binary
+        // win/loss outcomes (bit=1 ⇒ player A wins).
+        function getRequiredConditions(scenarios, unfinishedMatches) {
             if (!scenarios.length || !unfinishedMatches.length) return [];
             const required = [];
             for (let i = 0; i < unfinishedMatches.length; i++) {
                 const um = unfinishedMatches[i];
                 const aName = playerNames[um.playerAId] ?? '?';
                 const bName = playerNames[um.playerBId] ?? '?';
-                if (base === 2) {
-                    const allA = scenarios.every(s => (s >> i) & 1);
-                    const allB = scenarios.every(s => !((s >> i) & 1));
-                    if (allA) required.push(`${aName} beats ${bName}`);
-                    else if (allB) required.push(`${bName} beats ${aName}`);
-                } else {
-                    // base is always 5 for Swiss — use pre-computed powers
-                    const digits = scenarios.map(s => Math.floor(s / POW5[i]) % 5);
-                    const all = (...ds) => digits.every(d => ds.includes(d));
-                    if      (all(0))      required.push(`${aName} beats ${bName} 2-0`);
-                    else if (all(1))      required.push(`${aName} beats ${bName} 2-1`);
-                    else if (all(0,1))    required.push(`${aName} beats ${bName}`);
-                    else if (all(2))      required.push(`${bName} beats ${aName} 2-0`);
-                    else if (all(3))      required.push(`${bName} beats ${aName} 2-1`);
-                    else if (all(2,3))    required.push(`${bName} beats ${aName}`);
-                    else if (all(4))      required.push(`${aName} and ${bName} draw 1-1`);
-                }
+                const allA = scenarios.every(s => (s >> i) & 1);
+                const allB = scenarios.every(s => !((s >> i) & 1));
+                if (allA) required.push(`${aName} beats ${bName}`);
+                else if (allB) required.push(`${bName} beats ${aName}`);
             }
             return required;
         }
@@ -1340,87 +1293,99 @@
             return intro + levelBlocks;
         }
 
-        // Project the Top-N knockout bracket based on possible outcomes of the last Swiss round.
-        function projectKnockoutBracket() {
+        // ── Live top-cut bracket preview (final Swiss round in progress) ──
+        // Pairing during the final Swiss round is itself random (see PAIRING.md),
+        // so there is nothing meaningful to predict about IT. What's useful is a
+        // preview of the KO bracket that's about to start: fold the CURRENT
+        // standings (all matches finished so far, including whatever of the final
+        // round has been reported) into the fixed single-elimination bracket shape.
+        // No scenario enumeration — the round-1 slots simply reflect the latest
+        // known standings and are redrawn as each final-round match reports.
+        // Rounds beyond the first are undetermined until their own matches are
+        // played, so they're shown as bracket-shaped placeholders only.
+        function buildBracketRounds(cut, seededPlayers) {
+            const rounds = [];
+            let matches = [];
+            const h = cut / 2;
+            for (let i = 0; i < h; i++) {
+                const a = seededPlayers[i] ?? null;
+                const b = seededPlayers[cut - 1 - i] ?? null;
+                matches.push({
+                    aId: a?.playerId ?? null, aName: a?.name ?? null, aSeed: i + 1,
+                    bId: b?.playerId ?? null, bName: b?.name ?? null, bSeed: cut - i,
+                    known: true,
+                });
+            }
+            rounds.push(matches);
+            let m = matches.length;
+            let roundIdx = 1;
+            while (m > 1) {
+                const next = [];
+                for (let i = 0; i < m / 2; i++) {
+                    next.push({ fromA: i, fromB: m - 1 - i, roundIdx, known: false });
+                }
+                rounds.push(next);
+                m = next.length;
+                roundIdx++;
+            }
+            return rounds;
+        }
+
+        function computeLiveBracketPreview() {
             const cut = topCutSize(registrationCount);
             if (cut === 0) return null;
 
-            const allMatches = getAllMatches();
             const currentRnd = latestSwissRoundInfo();
-            const unfinished = currentRnd
-                ? (matchesByRound[currentRnd.id] ?? []).filter(m => !m.isFinished && !m.isBye)
-                : [];
-            const MAX = 6;
-            const capped = unfinished.slice(0, MAX);
-            const cacheKey = 'bracket:' + (currentRnd?.id ?? 'none') + ':' + capped.map(m => m.id).join(',');
+            const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
+            const unfinishedCount = currentMatches.filter(m => !m.isFinished && !m.isBye).length;
 
-            if (projectionCache?.cacheKey === cacheKey) return applyProjectionFilters(projectionCache.rawProj);
+            const finished = getAllMatches().filter(m => m.isFinished);
+            const standings = computeStandings(finished, allPlayerIds, playerNames);
+            sortStandings(standings);
+            const activeIds = computeActivePlayerIds();
+            const top = standings.filter(s => activeIds.has(s.playerId)).slice(0, cut);
 
-            const total = Math.pow(5, capped.length);
-            const base = allMatches.filter(m => m.isFinished);
+            const rounds = buildBracketRounds(cut, top);
+            // Round labels, largest cut first: "Top 8", "Top 4", "Final"
+            const labels = [];
+            for (let n = cut; n >= 2; n = n / 2) labels.push(n === 2 ? 'Final' : `Top ${n}`);
 
-            // Per bracket slot (0 = seed1 vs seedN, 1 = seed2 vs seedN-1, …):
-            // track which pairings occur across scenarios and whether the scenario had a standing tie.
-            const slotCounts = Array.from({ length: cut / 2 }, () => new Map());
+            return {
+                type: 'bracket-preview', cut, rounds, labels, unfinishedCount,
+                complete: unfinishedCount === 0,
+            };
+        }
 
-            for (let mask = 0; mask < total; mask++) {
-                const hypo = [...base];
-                for (let i = 0; i < capped.length; i++) {
-                    const m = capped[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW5[i]) % 5];
-                    hypo.push({
-                        ...m, isFinished: true, isDraw: outcome.isDraw,
-                        winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
-                        playerAScore: outcome.aScore, playerBScore: outcome.bScore,
-                    });
-                }
-                const standings = computeStandings(hypo, allPlayerIds, playerNames);
-                sortStandings(standings);
-                const hasTie = standings.some((s, i) => i > 0 &&
-                    s.points === standings[i-1].points &&
-                    Math.abs(s.omw - standings[i-1].omw) < 1e-9 &&
-                    Math.abs(s.gw - standings[i-1].gw) < 1e-9 &&
-                    Math.abs(s.ogw - standings[i-1].ogw) < 1e-9);
-                const top = standings.slice(0, cut);
-                for (let i = 0; i < cut / 2; i++) {
-                    const key = `${top[i].playerId}|${top[cut - 1 - i].playerId}`;
-                    if (!slotCounts[i].has(key)) slotCounts[i].set(key, { count: 0, scenarios: [], ambiguousScenarios: new Set() });
-                    const entry = slotCounts[i].get(key);
-                    entry.count++;
-                    entry.scenarios.push(mask);
-                    if (hasTie) entry.ambiguousScenarios.add(mask);
-                }
-            }
+        function renderBracketPreviewHTML(proj) {
+            const nameOrTbd = (name, seed) => name != null
+                ? `<span class="seed-badge" style="margin-right:0.35rem">${seed}</span>${esc(name)}`
+                : `<span style="color:#cbd5e1">TBD</span>`;
 
-            // Build per-player list from slot data
-            const playerMap = new Map();
-            for (const slotMap of slotCounts) {
-                for (const [key, { count, scenarios, ambiguousScenarios }] of slotMap) {
-                    const [aId, bId] = key.split('|').map(Number);
-                    for (const [pid, oppId] of [[aId, bId], [bId, aId]]) {
-                        if (!playerMap.has(pid)) playerMap.set(pid, { name: playerNames[pid] ?? 'Unknown', oppMap: new Map() });
-                        const om = playerMap.get(pid).oppMap;
-                        if (!om.has(oppId)) om.set(oppId, { id: oppId, name: playerNames[oppId] ?? 'Unknown', count: 0, scenarios: [], ambiguousScenarios: new Set() });
-                        const entry = om.get(oppId);
-                        entry.count += count;
-                        entry.scenarios.push(...scenarios);
-                        for (const m of ambiguousScenarios) entry.ambiguousScenarios.add(m);
+            const columns = proj.rounds.map((matches, ri) => {
+                const boxes = matches.map(m => {
+                    if (m.known) {
+                        return `<div class="bracket-match">
+                            <div class="bracket-slot">${nameOrTbd(m.aName, m.aSeed)}</div>
+                            <div class="bracket-slot">${nameOrTbd(m.bName, m.bSeed)}</div>
+                        </div>`;
                     }
-                }
-            }
-            const sortedForOrder = computeStandings(base, allPlayerIds, playerNames);
-            sortStandings(sortedForOrder);
-            const standingsOrder = new Map(sortedForOrder.map((s, i) => [s.playerId, i]));
-            const players = [...playerMap.entries()]
-                .map(([pid, { name, oppMap }]) => ({
-                    playerId: pid, name,
-                    opponents: [...oppMap.values()].sort((a, b) => b.count - a.count),
-                }))
-                .sort((a, b) => (standingsOrder.get(a.playerId) ?? 999) - (standingsOrder.get(b.playerId) ?? 999));
+                    return `<div class="bracket-match">
+                        <div class="bracket-slot tbd">Winner of Match ${m.fromA + 1}</div>
+                        <div class="bracket-slot tbd">Winner of Match ${m.fromB + 1}</div>
+                    </div>`;
+                }).join('');
+                return `<div class="bracket-round">
+                    <div class="bracket-round-label">${esc(proj.labels[ri])}</div>
+                    ${boxes}
+                </div>`;
+            }).join('');
 
-            const rawProj = { type: 'knockout-bracket', cut, totalScenarios: total, scenarioBase: 5, unfinishedCount: unfinished.length, unfinishedMatches: capped, players };
-            projectionCache = { cacheKey, rawProj };
-            return applyProjectionFilters(rawProj);
+            const note = proj.complete
+                ? `Final round complete — this is the confirmed Top ${proj.cut} bracket.`
+                : `Round 1 reflects current standings and updates as each remaining match in the final Swiss round is reported. Later rounds are undetermined until their own matches are played.`;
+
+            return `<div class="bracket-wrap">${columns}</div>
+                <p class="route-intro" style="margin-top:0.5rem">${note}</p>`;
         }
 
         // Project the next knockout round from the current KO state.
@@ -1522,7 +1487,7 @@
 
             return {
                 type: 'knockout-next', certain: koUnfinished.length === 0,
-                totalScenarios: total, scenarioBase: 2,
+                totalScenarios: total,
                 unfinishedCount: koUnfinished.length, unfinishedMatches: capped, players,
             };
         }
@@ -1539,7 +1504,7 @@
             const idx = swissRounds.indexOf(currentRnd);
             if (idx < 0) return null;
 
-            if (idx === swissRounds.length - 1) return projectKnockoutBracket();
+            if (idx === swissRounds.length - 1) return computeLiveBracketPreview();
             return projectNextSwissRound();
         }
 
@@ -1574,7 +1539,7 @@
                     return `<div class="proj-opp-simple">${oppSeedBadge}${esc(opp.name)}${countTag}${tiebreakTag}</div>`;
                 }
 
-                const conditions = getRequiredConditions(opp.scenarios, unfinishedMatches, proj.scenarioBase ?? 2);
+                const conditions = getRequiredConditions(opp.scenarios, unfinishedMatches);
                 const condBody = conditions.length
                     ? conditions.map(c => `<li>${esc(c)}</li>`).join('')
                     : `<li style="color:#94a3b8;font-style:italic">No single result is decisive — depends on multiple combinations</li>`;
@@ -1649,11 +1614,13 @@
                     container.innerHTML = renderStacksHTML(proj);
                     return;
 
-                } else if (proj.type === 'knockout-bracket') {
-                    const note = proj.unfinishedCount > 0
-                        ? ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios.toLocaleString()} scenario${proj.totalScenarios !== 1 ? 's' : ''}</span>`
-                        : '';
+                } else if (proj.type === 'bracket-preview') {
+                    const note = proj.complete
+                        ? ''
+                        : ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} remaining in the final Swiss round</span>`;
                     titleEl.innerHTML = `Top ${proj.cut} Bracket${note}`;
+                    container.innerHTML = renderBracketPreviewHTML(proj);
+                    return;
 
                 } else if (proj.type === 'knockout-next') {
                     const note = proj.certain
@@ -1663,9 +1630,7 @@
                 }
 
                 const accordion = proj.players.map(p => renderProjectionPlayer(p, proj)).join('');
-                const footer = proj.type === 'knockout-bracket'
-                    ? `<p class="route-intro" style="margin-top:0.5rem">Seeds based on Swiss standings — tiebreakers may shift positions.</p>`
-                    : proj.type === 'knockout-next'
+                const footer = proj.type === 'knockout-next'
                     ? `<p class="route-intro" style="margin-top:0.5rem">Fixed single-elimination bracket — set when the cut was made, no re-seeding between rounds.</p>`
                     : '';
                 container.innerHTML = `<div class="proj-accordion">${accordion}</div>${footer}`;
@@ -2001,7 +1966,7 @@
             pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
-            isEventComplete = false; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; showDrawOutcomes = true; projectionCache = null; lastProjectionRenderKey = null;
+            isEventComplete = false; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; showDrawOutcomes = true; lastProjectionRenderKey = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
             document.title = 'Watch Event — Set Championships';
 
