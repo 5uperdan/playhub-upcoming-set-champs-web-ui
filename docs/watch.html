@@ -85,8 +85,6 @@
                 </div>
             </div>
 
-            <!-- Route panel (shown below standings when route btn clicked) -->
-            <div id="route-panel" style="display:none"></div>
             <!-- ID safety panel (shown below standings when ID btn clicked) -->
             <div id="id-panel" style="display:none"></div>
 
@@ -106,12 +104,8 @@
                     <h2 id="next-round-title">Next Round Projection</h2>
                     <div style="margin-left:auto;display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap">
                         <div id="projection-draw-opts" style="display:none;align-items:center;gap:0.6rem;font-size:0.78rem;color:#64748b">
-                            <span style="font-size:0.75rem;color:#94a3b8">include draws:</span>
                             <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;user-select:none">
-                                <input type="checkbox" id="draw-11-toggle" checked style="cursor:pointer;accent-color:#2563eb"> 1-1
-                            </label>
-                            <label style="display:flex;align-items:center;gap:0.25rem;cursor:pointer;user-select:none">
-                                <input type="checkbox" id="draw-00-toggle" checked style="cursor:pointer;accent-color:#2563eb"> 0-0
+                                <input type="checkbox" id="draw-toggle" checked style="cursor:pointer;accent-color:#2563eb"> show draw outcomes
                             </label>
                         </div>
                         <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.82rem;color:#475569;cursor:pointer;white-space:nowrap;user-select:none">
@@ -173,14 +167,13 @@
         let registrationCount = 0;     // starting player count from event / registrations
 
         let isEventComplete = false;
-        let activeRoutePlayerId = null;
         let activeIDPlayerId = null;
         let standingsRoundIdx = null; // null = live/current; number = index into rounds-with-matches array
         let projectionEnabled = false;
-        let drawInclude11 = true;
-        let drawInclude00 = true;
-        // Full 6-outcome tree cached here; draw toggles filter from memory without recomputing.
-        // Invalidated when the capped unfinished match set changes (new round, match set shifts).
+        let showDrawOutcomes = true;  // single toggle: include 1-1 draw outcomes in projections
+        // Full 5-outcome tree cached here (bracket projection only); the draw toggle
+        // filters from memory without recomputing. Invalidated when the capped
+        // unfinished match set changes (new round, match set shifts).
         let projectionCache = null; // { cacheKey: string, rawProj: object }
         // Last render fingerprint — skip re-render when match data and draw flags haven't changed.
         let lastProjectionRenderKey = null;
@@ -414,23 +407,25 @@
                 }
             }
 
-            // Match win percentage (for OMW calculation)
-            // Floor at 1/3 per WotC/Lorcana tournament rules
+            // Match win percentage = match points / (3 × rounds played), floored
+            // at exactly 0.33 — validated against PlayHub's own final placements
+            // (a draw counts as ⅓ of a win; byes count as wins). See PAIRING.md.
+            const TB_FLOOR = 0.33;
             const mwp = {};
             for (const pid of playerIds) {
                 const s = stats[pid];
                 mwp[pid] = s.matchesPlayed === 0
-                    ? 1 / 3
-                    : Math.max(1 / 3, s.wins / s.matchesPlayed);
+                    ? TB_FLOOR
+                    : Math.max(TB_FLOOR, (3 * s.wins + s.draws) / (3 * s.matchesPlayed));
             }
 
-            // Game win percentage (floor at 1/3)
+            // Game win percentage (floor at 0.33)
             const gwp = {};
             for (const pid of playerIds) {
                 const s = stats[pid];
                 gwp[pid] = s.gamesPlayed === 0
-                    ? 1 / 3
-                    : Math.max(1 / 3, s.gamesWon / s.gamesPlayed);
+                    ? TB_FLOOR
+                    : Math.max(TB_FLOOR, s.gamesWon / s.gamesPlayed);
             }
 
             // Build final standing objects
@@ -438,18 +433,18 @@
             for (const pid of playerIds) {
                 const s = stats[pid];
 
-                // OMW%: average MWP of all non-bye opponents (each floored at 1/3), then floor avg at 1/3
-                let omw = 1 / 3;
+                // OMW%: average MWP of all non-bye opponents (each floored at 0.33), then floor avg at 0.33
+                let omw = TB_FLOOR;
                 if (s.opponents.length > 0) {
-                    const oppMwps = s.opponents.map(oid => Math.max(1 / 3, mwp[oid] ?? 1 / 3));
-                    omw = Math.max(1 / 3, oppMwps.reduce((a, b) => a + b, 0) / oppMwps.length);
+                    const oppMwps = s.opponents.map(oid => Math.max(TB_FLOOR, mwp[oid] ?? TB_FLOOR));
+                    omw = Math.max(TB_FLOOR, oppMwps.reduce((a, b) => a + b, 0) / oppMwps.length);
                 }
 
-                // OGW%: average GWP of all non-bye opponents (each floored at 1/3), then floor avg at 1/3
-                let ogw = 1 / 3;
+                // OGW%: average GWP of all non-bye opponents (each floored at 0.33), then floor avg at 0.33
+                let ogw = TB_FLOOR;
                 if (s.opponents.length > 0) {
-                    const oppGwps = s.opponents.map(oid => Math.max(1 / 3, gwp[oid] ?? 1 / 3));
-                    ogw = Math.max(1 / 3, oppGwps.reduce((a, b) => a + b, 0) / oppGwps.length);
+                    const oppGwps = s.opponents.map(oid => Math.max(TB_FLOOR, gwp[oid] ?? TB_FLOOR));
+                    ogw = Math.max(TB_FLOOR, oppGwps.reduce((a, b) => a + b, 0) / oppGwps.length);
                 }
 
                 standings.push({
@@ -577,136 +572,6 @@
         }
 
         // ═══════════════════════════════════════════════════════════
-        //  Route to top cut: project all remaining Swiss rounds
-        // ═══════════════════════════════════════════════════════════
-
-        // Multi-round DFS: enumerates outcomes of all remaining Swiss rounds, projecting
-        // future rounds' pairings via swissPairAlgorithm (same algorithm as pairings projection).
-        // Returns { routes, noRound, noUnfinished, searchedWithDraws, hitNodeCap }
-        // Each route: [{ round, isProjected, items: [{match, result}] }]
-        // Current-round segments include all unfinished match results; projected segments include only
-        // the target player's match (opponent determined by simulated pairings).
-        function findRoutesAllSwiss(playerId, cut) {
-            const swissRounds = rounds.filter(r => r.isSwiss);
-            const currentRnd = latestSwissRoundInfo();
-            if (!currentRnd) return { routes: [], noRound: true };
-
-            const currentIdx = swissRounds.indexOf(currentRnd);
-            const allMatches = getAllMatches();
-            const baseFinished = allMatches.filter(m => m.isFinished);
-            const remainingRounds = swissRounds.slice(currentIdx);
-
-            // Swiss is complete when the last known round has no unfinished matches
-            const currentRndMatches = matchesByRound[currentRnd.id] ?? [];
-            if (currentIdx === swissRounds.length - 1 &&
-                !currentRndMatches.some(m => !m.isFinished && !m.isBye)) {
-                return { routes: [], noUnfinished: true };
-            }
-
-            const MAX_ROUTES = 3;
-            const MAX_NODES = 100_000;
-            let nodesVisited = 0;
-            let hitNodeCap = false;
-            const routes = [];
-
-            const initialOppHist = buildOpponentHistory(allMatches);
-            const initialByeRec = buildByeRecipients(baseFinished);
-            const dfsActiveIds = computeActivePlayerIds();
-
-            function dfs(rndIdx, finished, oppHist, byeRec, path, useDraws) {
-                if (routes.length >= MAX_ROUTES || hitNodeCap) return;
-                if (++nodesVisited > MAX_NODES) { hitNodeCap = true; return; }
-
-                if (rndIdx >= remainingRounds.length) {
-                    const standings = computeStandings(finished, allPlayerIds, playerNames);
-                    sortStandings(standings);
-                    const rank = standings.findIndex(s => s.playerId === playerId);
-                    if (rank >= 0 && rank < cut) routes.push(path);
-                    return;
-                }
-
-                const rnd = remainingRounds[rndIdx];
-                const existing = matchesByRound[rnd.id] ?? [];
-                const alreadyDone = existing.filter(m => m.isFinished);
-                const isProjectedRound = existing.length === 0;
-
-                let toEnumerate;
-                let nextByeRec = byeRec;
-
-                if (isProjectedRound) {
-                    // Future round: generate pairings from current hypothetical standings.
-                    // Only pair active players — dropped players are excluded from pairings.
-                    const standings = computeStandings([...finished, ...alreadyDone], allPlayerIds, playerNames);
-                    sortStandings(standings);
-                    const activeStandings = standings.filter(s => dfsActiveIds.has(s.playerId));
-                    const { pairings, byeId } = swissPairAlgorithm(activeStandings, oppHist, byeRec);
-                    toEnumerate = pairings.map((p, i) => ({
-                        id: `proj_${rnd.id}_${i}`,
-                        playerAId: p.aId, playerAName: playerNames[p.aId] ?? 'Unknown',
-                        playerBId: p.bId, playerBName: playerNames[p.bId] ?? 'Unknown',
-                        isFinished: false, isBye: false, isSwiss: true, roundId: rnd.id,
-                    }));
-                    if (byeId != null) nextByeRec = new Set([...byeRec, byeId]);
-                } else {
-                    toEnumerate = existing.filter(m => !m.isFinished && !m.isBye);
-                }
-
-                const finishedWithDone = [...finished, ...alreadyDone];
-
-                if (toEnumerate.length === 0) {
-                    dfs(rndIdx + 1, finishedWithDone, oppHist, nextByeRec, path, useDraws);
-                    return;
-                }
-
-                const capped = toEnumerate.slice(0, 6);
-                // oppHistory for the next round is determined by pairings (fixed regardless of outcome)
-                const nextOppHist = buildOpponentHistory([...finishedWithDone, ...capped]);
-
-                // Current round: scored win/loss (or all 6 with draws).
-                // Projected rounds: binary A/B win only — scores approximate, sufficient for tiebreakers.
-                const outcomeSet = rndIdx === 0
-                    ? (useDraws ? ALL_SWISS_OUTCOMES : SWISS_WIN_OUTCOMES)
-                    : [SWISS_WIN_OUTCOMES[0], SWISS_WIN_OUTCOMES[2]]; // A 2-0, B 2-0
-                const base = outcomeSet.length;
-                const pows = Array.from({ length: capped.length }, (_, k) => Math.pow(base, k));
-
-                for (let mask = 0; mask < Math.pow(base, capped.length); mask++) {
-                    if (routes.length >= MAX_ROUTES || hitNodeCap) break;
-
-                    const newFinished = [...finishedWithDone];
-                    const segItems = [];
-
-                    for (let i = 0; i < capped.length; i++) {
-                        const m = capped[i];
-                        const outcome = outcomeSet[Math.floor(mask / pows[i]) % base];
-                        const result = {
-                            isFinished: true, isDraw: outcome.isDraw,
-                            winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
-                            playerAScore: outcome.aScore, playerBScore: outcome.bScore,
-                        };
-                        newFinished.push({ ...m, ...result });
-                        // Current round: show all matches. Projected rounds: only the player's match.
-                        const isPlayerMatch = m.playerAId === playerId || m.playerBId === playerId;
-                        if (!isProjectedRound || isPlayerMatch) segItems.push({ match: m, result });
-                    }
-
-                    const newSeg = segItems.length > 0 ? { round: rnd, isProjected: isProjectedRound, items: segItems } : null;
-                    dfs(rndIdx + 1, newFinished, nextOppHist, nextByeRec, newSeg ? [...path, newSeg] : path, useDraws);
-                }
-            }
-
-            dfs(0, baseFinished, initialOppHist, initialByeRec, [], false);
-            const searchedWithDraws = routes.length === 0 && !hitNodeCap;
-            if (searchedWithDraws) {
-                nodesVisited = 0;
-                hitNodeCap = false;
-                dfs(0, baseFinished, initialOppHist, initialByeRec, [], true);
-            }
-
-            return { routes, noRound: false, noUnfinished: false, searchedWithDraws, hitNodeCap };
-        }
-
-        // ═══════════════════════════════════════════════════════════
         //  Rendering helpers
         // ═══════════════════════════════════════════════════════════
         function esc(str) {
@@ -804,16 +669,18 @@
             }
 
             const hasUnfinished = currentMatches.some(m => !m.isFinished && !m.isBye);
-            const showRouteBtn = !isEventComplete && !isHistoricalView && cut > 0;
 
-            // Safe-to-ID button: only in last two Swiss rounds
+            // Safe-to-ID button: only once the FINAL Swiss round's pairings exist —
+            // pairings are then known, so the check is deterministic (see PAIRING.md;
+            // earlier-round pairings have a random element and can't be projected).
             const swissRndList = rounds.filter(r => r.isSwiss);
             const currentSwissIdx = currentRnd ? swissRndList.indexOf(currentRnd) : -1;
-            const isLastTwoSwiss = !isHistoricalView && !isEventComplete && cut > 0
-                && swissRndList.length >= 2 && currentSwissIdx >= swissRndList.length - 2;
+            const isFinalSwissPaired = !isHistoricalView && !isEventComplete && cut > 0
+                && swissRndList.length >= 1 && currentSwissIdx === swissRndList.length - 1
+                && currentMatches.length > 0;
             // Precompute per-player unfinished count for eligibility check
             const playerUnfinishedCountMap = new Map();
-            if (isLastTwoSwiss) {
+            if (isFinalSwissPaired) {
                 for (const m of allMatches) {
                     if (!m.isSwiss || m.isFinished || m.isBye) continue;
                     if (m.playerAId != null) playerUnfinishedCountMap.set(m.playerAId, (playerUnfinishedCountMap.get(m.playerAId) ?? 0) + 1);
@@ -871,17 +738,14 @@
                     ? `<td style="text-align:right;padding-right:0.5rem"><span class="in-cut-rank">${idx + 1}</span></td>`
                     : `<td style="text-align:right;color:#94a3b8;font-size:0.82rem;padding-right:0.5rem">${idx + 1}</td>`;
 
-                // Player name + dropped badge + route button + ID button
+                // Player name + dropped badge + ID button
                 const isDropped = droppedIds.has(s.playerId);
                 const droppedBadge = isDropped ? ` <span class="dropped-badge">dropped</span>` : '';
-                const routeBtn = showRouteBtn && !isDropped
-                    ? ` <button class="route-btn${activeRoutePlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Route to top ${cut}">🎯</button>`
-                    : '';
-                const canCheckID = isLastTwoSwiss && !isDropped && (playerUnfinishedCountMap.get(s.playerId) ?? 0) <= 1;
+                const canCheckID = isFinalSwissPaired && !isDropped && (playerUnfinishedCountMap.get(s.playerId) ?? 0) <= 1;
                 const idBtn = canCheckID
                     ? ` <button class="id-btn${activeIDPlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Check if safe to intentionally draw">🤝</button>`
                     : '';
-                const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${droppedBadge}${routeBtn}${idBtn}</span></td>`;
+                const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${droppedBadge}${idBtn}</span></td>`;
 
                 // Determine row background — simplified for historical view
                 let rowBg = '';
@@ -946,14 +810,6 @@
 
             document.getElementById('standings-container').innerHTML =
                 `<table id="standings-table">${thead}<tbody>${rows}</tbody></table>${cutLegend}`;
-
-            // Wire up route buttons
-            document.querySelectorAll('.route-btn[data-player-id]').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    const pid = parseInt(btn.dataset.playerId, 10);
-                    toggleRoutePanel(pid, standings, cut);
-                });
-            });
 
             // Wire up ID buttons
             document.querySelectorAll('.id-btn[data-player-id]').forEach(btn => {
@@ -1064,154 +920,24 @@
                 <tbody>${rows}${byeRows}</tbody>
             </table>`;
         }
-        function toggleRoutePanel(playerId, standings, cut) {
-            const panel = document.getElementById('route-panel');
-
-            if (activeRoutePlayerId === playerId) {
-                activeRoutePlayerId = null;
-                panel.style.display = 'none';
-                panel.innerHTML = '';
-                renderStandings();
-                return;
-            }
-
-            // Close ID panel if open
-            if (activeIDPlayerId !== null) {
-                activeIDPlayerId = null;
-                const idPanel = document.getElementById('id-panel');
-                idPanel.style.display = 'none';
-                idPanel.innerHTML = '';
-            }
-
-            activeRoutePlayerId = playerId;
-            renderStandings();
-
-            const targetStanding = standings.find(s => s.playerId === playerId);
-            const targetName = targetStanding?.name ?? 'Player';
-
-            // Find current standing rank
-            const currentRank = standings.findIndex(s => s.playerId === playerId) + 1;
-            if (cut > 0 && currentRank <= cut) {
-                panel.innerHTML = renderRouteHTML(targetName, playerId, null, false, cut, true, currentRank);
-                panel.style.display = '';
-                wireRouteClose();
-                panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                return;
-            }
-
-            const { routes, noRound, noUnfinished, searchedWithDraws, hitNodeCap } = findRoutesAllSwiss(playerId, cut);
-
-            panel.innerHTML = renderRouteHTML(targetName, playerId, routes, searchedWithDraws, cut, false, currentRank, noRound, noUnfinished, hitNodeCap);
-            panel.style.display = '';
-            wireRouteClose();
-            panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-
-        function renderRouteHTML(playerName, playerId, routes, searchedWithDraws, cut, alreadyIn, currentRank, noRound, noUnfinished, hitNodeCap) {
-            const closeBtn = `<button class="mini-btn" id="route-close-btn">✕ Close</button>`;
-
-            if (alreadyIn) {
-                return `<div class="route-panel">
-                <div class="route-panel-header">
-                    <h3>🎯 ${esc(playerName)}</h3>
-                    ${closeBtn}
-                </div>
-                <p class="route-intro" style="color:#166534">Currently in position ${currentRank} — within the top ${cut} cut! 🎉</p>
-            </div>`;
-            }
-
-            if (noRound) {
-                return `<div class="route-panel">
-                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
-                <p class="route-intro">No rounds have started yet.</p>
-            </div>`;
-            }
-
-            if (noUnfinished) {
-                return `<div class="route-panel">
-                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
-                <p class="route-intro">Swiss rounds are complete.</p>
-            </div>`;
-            }
-
-            if (routes.length === 0) {
-                const msg = hitNodeCap
-                    ? `Search exceeded scenario limit — no path found. (Player may still have a slim route.)`
-                    : `No path to the top ${cut} found — even considering draws.`;
-                return `<div class="route-panel">
-                <div class="route-panel-header"><h3>🎯 Route to top cut — ${esc(playerName)}</h3>${closeBtn}</div>
-                <p style="color:#dc2626;font-size:0.875rem">${msg}</p>
-            </div>`;
-            }
-
-            const introText = searchedWithDraws
-                ? `No path without draws found. These options require at least one draw:`
-                : `Showing ${routes.length > 1 ? 'up to 3 scenarios' : 'one scenario'} where <strong>${esc(playerName)}</strong> reaches the top ${cut}:`;
-
-            const scenarioCards = routes.map((route, i) => {
-                // route: [{round, isProjected, items: [{match, result}]}]
-                const roundSections = route.map(seg => {
-                    const { round, isProjected, items } = seg;
-                    const projBadge = isProjected
-                        ? ` <span class="proj-chip possible" style="font-size:0.68rem;padding:1px 5px;vertical-align:middle">projected pairing</span>`
-                        : '';
-                    const chips = items.map(({ match, result }) => {
-                        const aName = esc(playerNames[match.playerAId] ?? match.playerAName ?? '?');
-                        const bName = esc(playerNames[match.playerBId] ?? match.playerBName ?? '?');
-                        if (result.isDraw) return `<span class="outcome-chip draw">${aName} draws with ${bName}</span>`;
-                        if (result.winnerId === match.playerAId) return `<span class="outcome-chip win">${aName} beats ${bName}</span>`;
-                        return `<span class="outcome-chip loss">${bName} beats ${aName}</span>`;
-                    }).join('');
-                    return `<div class="route-round-section">
-                        <div class="route-round-label">${esc(round.name)}${projBadge}</div>
-                        <div class="scenario-outcomes">${chips}</div>
-                    </div>`;
-                }).join('');
-
-                return `<div class="scenario-card">
-                <div class="scenario-label">Option ${i + 1}</div>
-                ${roundSections}
-            </div>`;
-            }).join('');
-
-            return `<div class="route-panel">
-            <div class="route-panel-header">
-                <h3>🎯 Route to top cut — ${esc(playerName)}</h3>
-                ${closeBtn}
-            </div>
-            <p class="route-intro">${introText}</p>
-            ${scenarioCards}
-        </div>`;
-        }
-
-        function wireRouteClose() {
-            const btn = document.getElementById('route-close-btn');
-            if (btn) {
-                btn.addEventListener('click', () => {
-                    activeRoutePlayerId = null;
-                    document.getElementById('route-panel').style.display = 'none';
-                    renderStandings();
-                });
-            }
-        }
 
         // ═══════════════════════════════════════════════════════════
         //  Safe-to-ID check
         // ═══════════════════════════════════════════════════════════
 
-        // Returns availability + safety result for intentionally drawing 0-0.
-        // Conditions: penultimate or final Swiss round; player has exactly 1
-        // unknown result remaining; if projected, opponent must be 100% certain.
+        // Returns availability + safety result for intentionally drawing.
+        // Only available once the FINAL Swiss round's pairings have been made —
+        // the player's opponent is then a fact, not a projection, so the check
+        // is fully deterministic given the remaining results. (Earlier rounds'
+        // pairings have a genuine random element — see PAIRING.md.)
         function checkSafeToID(playerId, cut) {
             const swissRounds = rounds.filter(r => r.isSwiss);
             const currentRnd = latestSwissRoundInfo();
             if (!currentRnd) return { available: false, reason: 'no active round' };
 
             const currentIdx = swissRounds.indexOf(currentRnd);
-            const isFinalRound  = currentIdx === swissRounds.length - 1;
-            const isPenultimate = currentIdx === swissRounds.length - 2;
-            if (!isFinalRound && !isPenultimate) {
-                return { available: false, reason: 'only available in the last two Swiss rounds' };
+            if (currentIdx !== swissRounds.length - 1) {
+                return { available: false, reason: 'only available once the final Swiss round has been paired' };
             }
 
             const allMatches  = getAllMatches();
@@ -1223,69 +949,16 @@
                 (m.playerAId === playerId || m.playerBId === playerId)
             );
 
-            let idMatch = null, isProjected = false, opponentId = null, opponentName = null;
-
-            if (playerUnfinished.length === 1 && isFinalRound) {
-                // Final round, player's match is the 1 unknown
-                idMatch = playerUnfinished[0];
-                opponentId = idMatch.playerAId === playerId ? idMatch.playerBId : idMatch.playerAId;
-                opponentName = playerNames[opponentId] ?? 'Unknown';
-
-            } else if (playerUnfinished.length === 0 && isPenultimate) {
-                // Penultimate done — find the certain final round opponent
-                const otherRoundN1Unfinished = (matchesByRound[currentRnd.id] ?? []).filter(m =>
-                    !m.isFinished && !m.isBye &&
-                    m.playerAId !== playerId && m.playerBId !== playerId
-                );
-
-                if (otherRoundN1Unfinished.length === 0) {
-                    // All penultimate matches done — compute final round pairings directly
-                    const standingsNow = computeStandings(baseFinished, allPlayerIds, playerNames);
-                    sortStandings(standingsNow);
-                    const activeIds = computeActivePlayerIds();
-                    const { pairings, byeId } = swissPairAlgorithm(
-                        standingsNow.filter(s => activeIds.has(s.playerId)),
-                        buildOpponentHistory(baseFinished),
-                        buildByeRecipients(baseFinished)
-                    );
-                    if (byeId === playerId) return { available: false, reason: 'player receives a bye in the final round' };
-                    const myPairing = pairings.find(p => p.aId === playerId || p.bId === playerId);
-                    if (!myPairing) return { available: false, reason: 'could not determine final round pairing' };
-                    opponentId = myPairing.aId === playerId ? myPairing.bId : myPairing.aId;
-                    opponentName = myPairing.aId === playerId ? myPairing.bName : myPairing.aName;
-                } else {
-                    // Some penultimate matches still going — enumerate to verify certainty
-                    const MAX_PROJ = 6;
-                    const cappedProj = otherRoundN1Unfinished.slice(0, MAX_PROJ);
-                    const possOpps = enumerateSwissScenarios(cappedProj, baseFinished);
-                    const playerOpps = possOpps.get(playerId);
-                    if (!playerOpps) return { available: false, reason: 'player not found in projection' };
-                    const totalScen = Math.pow(6, cappedProj.length);
-                    const certainOpp = [...playerOpps.values()].find(o => o.id != null && o.count === totalScen);
-                    if (!certainOpp) return { available: false, reason: 'final round opponent not yet certain — other matches must finish first' };
-                    opponentId = certainOpp.id;
-                    opponentName = certainOpp.name;
-                }
-
-                isProjected = true;
-                const nextRnd = swissRounds[currentIdx + 1];
-                idMatch = {
-                    id: `id_proj_${playerId}`,
-                    playerAId: playerId,  playerAName: playerNames[playerId] ?? 'Unknown',
-                    playerBId: opponentId, playerBName: opponentName,
-                    isFinished: false, isBye: false, isSwiss: true, roundId: nextRnd.id,
-                };
-
-            } else if (playerUnfinished.length === 0 && isFinalRound) {
+            if (playerUnfinished.length === 0) {
                 return { available: false, reason: 'player has already finished all Swiss rounds' };
-            } else {
-                return {
-                    available: false,
-                    reason: isPenultimate
-                        ? 'current round result not yet in — must be reported before checking'
-                        : `${playerUnfinished.length} unfinished match${playerUnfinished.length !== 1 ? 'es' : ''} remain`,
-                };
             }
+            if (playerUnfinished.length > 1) {
+                return { available: false, reason: `${playerUnfinished.length} unfinished matches remain` };
+            }
+
+            const idMatch = playerUnfinished[0];
+            const opponentId = idMatch.playerAId === playerId ? idMatch.playerBId : idMatch.playerAId;
+            const opponentName = playerNames[opponentId] ?? 'Unknown';
 
             // Build the hypothetical 0-0 ID result
             const idResult = {
@@ -1294,10 +967,7 @@
                 playerAScore: 0, playerBScore: 0,
             };
 
-            // Other unfinished matches to enumerate for safety check.
-            // In both cases this is the current round's remaining matches (not the player's own).
-            // Penultimate: these are other round N-1 matches whose outcomes affect standings/tiebreakers.
-            // Final:       these are other round N matches that affect the player's rank directly.
+            // Other unfinished final-round matches to enumerate for the safety check.
             const otherUnfinished = (matchesByRound[currentRnd.id] ?? []).filter(m =>
                 !m.isFinished && !m.isBye &&
                 m.playerAId !== playerId && m.playerBId !== playerId
@@ -1331,14 +1001,16 @@
             const capped = relevant.slice(0, MAX);
             const truncated = relevant.length > MAX;
 
-            const totalScenarios = Math.pow(6, capped.length);
+            // 5 outcomes per match (win variants + 1-1 draw); unreported 0-0
+            // draws are not considered possible.
+            const totalScenarios = Math.pow(5, capped.length);
             const unsafeMasks = [], rankPerMask = [];
 
             for (let mask = 0; mask < totalScenarios; mask++) {
                 const hypo = [...baseFinished, idResult];
                 for (let i = 0; i < capped.length; i++) {
                     const m = capped[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
+                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW5[i]) % 5];
                     hypo.push({
                         ...m, isFinished: true, isDraw: outcome.isDraw,
                         winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
@@ -1355,7 +1027,7 @@
             }
 
             return {
-                available: true, idMatch, isProjected, opponentId, opponentName,
+                available: true, idMatch, opponentId, opponentName,
                 safe: unsafeMasks.length === 0,
                 unsafeMasks, rankPerMask, totalScenarios, otherMatches: capped, truncated,
             };
@@ -1375,10 +1047,7 @@
                 </div>`;
             }
 
-            const projBadge = result.isProjected
-                ? ` <span class="proj-chip possible" style="font-size:0.68rem;padding:1px 5px;vertical-align:middle">projected pairing</span>`
-                : '';
-            const idLine = `<p class="route-intro">Simulating: <strong>${esc(playerName)}</strong> 0–0 draw with <strong>${esc(result.opponentName)}</strong>${projBadge}</p>`;
+            const idLine = `<p class="route-intro">Simulating: <strong>${esc(playerName)}</strong> 0–0 draw with <strong>${esc(result.opponentName)}</strong></p>`;
 
             // Deterministic: no other matches to enumerate
             if (result.otherMatches.length === 0) {
@@ -1405,7 +1074,7 @@
             // Describe each unsafe scenario
             const scenarioDescriptions = result.unsafeMasks.map((mask, mi) => {
                 const conditions = result.otherMatches.map((m, i) => {
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
+                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW5[i]) % 5];
                     const aName = esc(playerNames[m.playerAId] ?? m.playerAName ?? '?');
                     const bName = esc(playerNames[m.playerBId] ?? m.playerBName ?? '?');
                     if (outcome.isDraw) return `${aName} &amp; ${bName} draw ${outcome.aScore}–${outcome.bScore}`;
@@ -1457,14 +1126,6 @@
                 return;
             }
 
-            // Close route panel if open
-            if (activeRoutePlayerId !== null) {
-                activeRoutePlayerId = null;
-                const routePanel = document.getElementById('route-panel');
-                routePanel.style.display = 'none';
-                routePanel.innerHTML = '';
-            }
-
             activeIDPlayerId = playerId;
             renderStandings();
 
@@ -1489,66 +1150,10 @@
         //  Next Round Projection
         // ═══════════════════════════════════════════════════════════
 
-        function buildOpponentHistory(matches) {
-            const h = new Map();
-            for (const m of matches) {
-                if (m.isBye || m.playerAId == null || m.playerBId == null) continue;
-                if (!h.has(m.playerAId)) h.set(m.playerAId, new Set());
-                if (!h.has(m.playerBId)) h.set(m.playerBId, new Set());
-                h.get(m.playerAId).add(m.playerBId);
-                h.get(m.playerBId).add(m.playerAId);
-            }
-            return h;
-        }
-
-        function buildByeRecipients(matches) {
-            const s = new Set();
-            for (const m of matches) if (m.isBye && m.playerAId != null) s.add(m.playerAId);
-            return s;
-        }
-
-        // Sort-then-pair Swiss algorithm: pair top→bottom, avoid rematches and double byes.
-        function swissPairAlgorithm(sortedStandings, oppHistory, byeRec) {
-            const rem = [...sortedStandings];
-            const pairings = [];
-
-            while (rem.length >= 2) {
-                const p1 = rem.shift();
-                const p1Opp = oppHistory.get(p1.playerId) ?? new Set();
-                let idx = rem.findIndex(p => !p1Opp.has(p.playerId));
-                if (idx < 0) idx = 0; // forced rematch
-                const p2 = rem.splice(idx, 1)[0];
-                pairings.push({ aId: p1.playerId, aName: p1.name, bId: p2.playerId, bName: p2.name });
-            }
-
-            let byeId = null, byeName = null;
-            if (rem.length === 1) {
-                const last = rem[0];
-                let assigned = false;
-                if (byeRec.has(last.playerId)) {
-                    // Try to swap with a pairing partner who hasn't had a bye
-                    for (let i = pairings.length - 1; i >= 0 && !assigned; i--) {
-                        const p = pairings[i];
-                        if (!byeRec.has(p.bId)) {
-                            byeId = p.bId; byeName = p.bName;
-                            pairings[i] = { ...p, bId: last.playerId, bName: last.name };
-                            assigned = true;
-                        } else if (!byeRec.has(p.aId)) {
-                            byeId = p.aId; byeName = p.aName;
-                            pairings[i] = { aId: last.playerId, aName: last.name, bId: p.bId, bName: p.bName };
-                            assigned = true;
-                        }
-                    }
-                }
-                if (!assigned) { byeId = last.playerId; byeName = last.name; }
-            }
-
-            return { pairings, byeId, byeName };
-        }
-
-        // Swiss outcome set: 4 win/loss variants + 2 draw types.
-        // DB stats: draws are ~6.3% of all matches; 0-0 draws (55%) slightly more common than 1-1 (45%).
-        // Enumeration always uses all 6; draw filtering happens post-computation via applyProjectionFilters.
+        // Swiss outcome set: 4 win/loss variants + the 1-1 draw.
+        // Hypothetical 0-0 draws are deliberately NOT enumerated — a 0-0 that
+        // hasn't been reported is treated as impossible. (Already-reported 0-0
+        // results still count normally via the match data.)
         const SWISS_WIN_OUTCOMES = [
             { aScore: 2, bScore: 0, isDraw: false, aWins: true,  label: 'A2-0' },
             { aScore: 2, bScore: 1, isDraw: false, aWins: true,  label: 'A2-1' },
@@ -1556,81 +1161,24 @@
             { aScore: 1, bScore: 2, isDraw: false, aWins: false, label: 'B2-1' },
         ];
         const SWISS_DRAW_11 = { aScore: 1, bScore: 1, isDraw: true, aWins: null, label: 'D1-1' };
-        const SWISS_DRAW_00 = { aScore: 0, bScore: 0, isDraw: true, aWins: null, label: 'D0-0' };
-        const ALL_SWISS_OUTCOMES = [...SWISS_WIN_OUTCOMES, SWISS_DRAW_11, SWISS_DRAW_00]; // always 6
-        const POW6 = [1, 6, 36, 216, 1296, 7776]; // precomputed powers of 6 for mask decoding (max 6 positions)
+        const ALL_SWISS_OUTCOMES = [...SWISS_WIN_OUTCOMES, SWISS_DRAW_11]; // always 5
+        const POW5 = [1, 5, 25, 125, 625, 3125]; // precomputed powers of 5 for mask decoding (max 6 positions)
 
-        // Enumerate all 6^n scenarios for unfinished Swiss matches.
-        // Returns possibleOpponents: Map<playerId, Map<oppId|'bye', {id, name, count, scenarios, ambiguousScenarios}>>
-        // ambiguousScenarios: Set of masks where standings had a genuine tiebreak (tied on all 4 real TB)
-        function enumerateSwissScenarios(cappedUnfinished, baseFinished) {
-            const totalScenarios = Math.pow(6, cappedUnfinished.length);
-            const possibleOpponents = new Map();
-            const addOpp = (pid, oppKey, oppName, oppId, mask, isAmbiguous) => {
-                if (!possibleOpponents.has(pid)) possibleOpponents.set(pid, new Map());
-                const m = possibleOpponents.get(pid);
-                if (!m.has(oppKey)) m.set(oppKey, { id: oppId, name: oppName, count: 0, scenarios: [], ambiguousScenarios: new Set() });
-                const entry = m.get(oppKey);
-                entry.count++;
-                entry.scenarios.push(mask);
-                if (isAmbiguous) entry.ambiguousScenarios.add(mask);
-            };
-
-            // Opponent pairings are the same in every scenario (only outcomes differ),
-            // so pre-compute history, bye recipients, and active player set once.
-            const fixedOppHistory = buildOpponentHistory([...baseFinished, ...cappedUnfinished]);
-            const fixedByeRec = buildByeRecipients(baseFinished); // cappedUnfinished is pre-filtered !isBye
-            const fixedActiveIds = computeActivePlayerIds();
-
-            for (let mask = 0; mask < totalScenarios; mask++) {
-                const hypo = [...baseFinished];
-                for (let i = 0; i < cappedUnfinished.length; i++) {
-                    const m = cappedUnfinished[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
-                    hypo.push({
-                        ...m, isFinished: true, isDraw: outcome.isDraw,
-                        winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
-                        playerAScore: outcome.aScore, playerBScore: outcome.bScore,
-                    });
-                }
-                const standings = computeStandings(hypo, allPlayerIds, playerNames);
-                sortStandings(standings);
-                // Detect genuine standing ties (equal on all 4 real tiebreakers, ignoring name fallback)
-                const hasTie = standings.some((s, i) => i > 0 &&
-                    s.points === standings[i-1].points &&
-                    Math.abs(s.omw - standings[i-1].omw) < 1e-9 &&
-                    Math.abs(s.gw - standings[i-1].gw) < 1e-9 &&
-                    Math.abs(s.ogw - standings[i-1].ogw) < 1e-9);
-                const { pairings, byeId } = swissPairAlgorithm(standings.filter(s => fixedActiveIds.has(s.playerId)), fixedOppHistory, fixedByeRec);
-                for (const p of pairings) {
-                    addOpp(p.aId, p.bId, p.bName, p.bId, mask, hasTie);
-                    addOpp(p.bId, p.aId, p.aName, p.aId, mask, hasTie);
-                }
-                if (byeId != null) addOpp(byeId, 'bye', 'BYE', null, mask, false);
-            }
-            return possibleOpponents;
-        }
-
-        // Filter a raw 6-outcome projection for the current draw type settings.
-        // Returns a new proj with scenarios arrays filtered and totalScenarios updated.
-        // scenarioBase stays 6 — masks are always base-6 encoded for correct getRequiredConditions decoding.
+        // Filter a raw 5-outcome projection for the draw toggle. scenarioBase
+        // stays 5 — masks are always base-5 encoded for correct decoding.
         function applyProjectionFilters(rawProj) {
             const { scenarioBase, unfinishedMatches } = rawProj;
             const n = unfinishedMatches.length;
-            if (scenarioBase !== 6 || n === 0) return rawProj;
+            if (scenarioBase !== 5 || n === 0 || showDrawOutcomes) return rawProj;
 
-            const need11 = drawInclude11, need00 = drawInclude00;
+            // draw toggle off: exclude any scenario containing a 1-1 draw (digit 4)
             const isValid = mask => {
                 for (let i = 0; i < n; i++) {
-                    const d = Math.floor(mask / POW6[i]) % 6;
-                    if (d === 4 && !need11) return false;
-                    if (d === 5 && !need00) return false;
+                    if (Math.floor(mask / POW5[i]) % 5 === 4) return false;
                 }
                 return true;
             };
-
-            const activeBase = 4 + (need11 ? 1 : 0) + (need00 ? 1 : 0);
-            const filteredTotal = Math.pow(activeBase, n);
+            const filteredTotal = Math.pow(4, n);
 
             const filteredPlayers = rawProj.players.map(player => ({
                 ...player,
@@ -1648,7 +1196,7 @@
         }
 
         // Return the match outcomes that are the same across every scenario in the set.
-        // base=6: Swiss (always base-6 encoded masks). base=2: KO (binary win/loss).
+        // base=5: Swiss (base-5 encoded masks). base=2: KO (binary win/loss).
         function getRequiredConditions(scenarios, unfinishedMatches, base) {
             if (!scenarios.length || !unfinishedMatches.length) return [];
             const required = [];
@@ -1662,8 +1210,8 @@
                     if (allA) required.push(`${aName} beats ${bName}`);
                     else if (allB) required.push(`${bName} beats ${aName}`);
                 } else {
-                    // base is always 6 for Swiss — use pre-computed powers
-                    const digits = scenarios.map(s => Math.floor(s / POW6[i]) % 6);
+                    // base is always 5 for Swiss — use pre-computed powers
+                    const digits = scenarios.map(s => Math.floor(s / POW5[i]) % 5);
                     const all = (...ds) => digits.every(d => ds.includes(d));
                     if      (all(0))      required.push(`${aName} beats ${bName} 2-0`);
                     else if (all(1))      required.push(`${aName} beats ${bName} 2-1`);
@@ -1672,14 +1220,23 @@
                     else if (all(3))      required.push(`${bName} beats ${aName} 2-1`);
                     else if (all(2,3))    required.push(`${bName} beats ${aName}`);
                     else if (all(4))      required.push(`${aName} and ${bName} draw 1-1`);
-                    else if (all(5))      required.push(`${aName} and ${bName} draw 0-0`);
-                    else if (all(4,5))    required.push(`${aName} and ${bName} draw`);
                 }
             }
             return required;
         }
 
-        // Project the next non-final Swiss round (rounds 2..N-1 in progress).
+        // ── Next-round points stacks (mid-Swiss) ────────────────────
+        // PlayHub pairing is NOT deterministic (verified empirically against
+        // ~2,500 rounds — see PAIRING.md in the parent repo): within a points
+        // group, players are ordered by ph_user_id, the low-ID half plays the
+        // high-ID half, and the exact assignment within that constraint has a
+        // genuine per-round random element. So instead of predicting opponents,
+        // show per next-round points total the possible members sorted by
+        // ph_user_id, split into low/high stacks at the midpoint.
+        // A player with an unfinished match appears at up to three levels:
+        // "if they beat X" (P+3), "if they draw" (P+1), "if they lose" (P).
+        // No scenario enumeration is needed — a player's next-round points
+        // depend only on their own result.
         function projectNextSwissRound() {
             const swissRounds = rounds.filter(r => r.isSwiss);
             const currentRnd = latestSwissRoundInfo();
@@ -1687,40 +1244,100 @@
             const idx = swissRounds.indexOf(currentRnd);
             if (idx < 0 || idx === swissRounds.length - 1) return null;
 
-            const allMatches = getAllMatches();
-            const unfinished = (matchesByRound[currentRnd.id] ?? []).filter(m => !m.isFinished && !m.isBye);
-            const MAX = 6;
-            const capped = unfinished.slice(0, MAX);
-            const cacheKey = 'swiss:' + currentRnd.id + ':' + capped.map(m => m.id).join(',');
+            const finished = getAllMatches().filter(m => m.isFinished);
+            const standings = computeStandings(finished, allPlayerIds, playerNames);
+            const pointsOf = new Map(standings.map(s => [s.playerId, s.points]));
+            const activeIds = computeActivePlayerIds();
+            const currentMatches = matchesByRound[currentRnd.id] ?? [];
 
-            if (projectionCache?.cacheKey === cacheKey) return applyProjectionFilters(projectionCache.rawProj);
+            const entriesByLevel = new Map(); // points -> [{playerId, name, kind, cond}]
+            const addEntry = (level, playerId, kind, cond) => {
+                if (!entriesByLevel.has(level)) entriesByLevel.set(level, []);
+                entriesByLevel.get(level).push({
+                    playerId, name: playerNames[playerId] ?? 'Unknown', kind, cond,
+                });
+            };
 
-            const total = Math.pow(6, capped.length);
-            const base = allMatches.filter(m => m.isFinished);
-            const possOpp = enumerateSwissScenarios(capped, base);
-            const displayStandings = computeStandings(base, allPlayerIds, playerNames);
-            sortStandings(displayStandings);
+            const handled = new Set();
+            for (const m of currentMatches) {
+                if (m.isBye) {
+                    // A bye is a win; if not yet recorded, project the 3 points.
+                    const pid = m.playerAId;
+                    if (pid == null || !activeIds.has(pid) || m.isFinished) continue;
+                    handled.add(pid);
+                    addEntry((pointsOf.get(pid) ?? 0) + 3, pid, 'certain', 'bye');
+                    continue;
+                }
+                if (m.isFinished) continue; // result already in standings → certain
+                const aId = m.playerAId, bId = m.playerBId;
+                if (aId == null || bId == null) continue;
+                const aP = pointsOf.get(aId) ?? 0, bP = pointsOf.get(bId) ?? 0;
+                const aN = playerNames[aId] ?? 'Unknown', bN = playerNames[bId] ?? 'Unknown';
+                handled.add(aId); handled.add(bId);
+                addEntry(aP + 3, aId, 'win',  `if they beat ${bN}`);
+                addEntry(aP + 1, aId, 'draw', `if they draw with ${bN}`);
+                addEntry(aP,     aId, 'loss', `if they lose to ${bN}`);
+                addEntry(bP + 3, bId, 'win',  `if they beat ${aN}`);
+                addEntry(bP + 1, bId, 'draw', `if they draw with ${aN}`);
+                addEntry(bP,     bId, 'loss', `if they lose to ${aN}`);
+            }
+            // Everyone else active is locked to their current points.
+            for (const pid of activeIds) {
+                if (!handled.has(pid)) addEntry(pointsOf.get(pid) ?? 0, pid, 'certain', null);
+            }
 
-            const players = displayStandings
-                .filter(s => possOpp.has(s.playerId))
-                .map(s => ({
-                    playerId: s.playerId,
-                    name: playerNames[s.playerId] ?? 'Unknown',
-                    opponents: [...possOpp.get(s.playerId).values()].sort((a, b) => b.count - a.count),
+            const levels = [...entriesByLevel.entries()]
+                .sort((a, b) => b[0] - a[0])
+                .map(([points, entries]) => ({
+                    points,
+                    entries: entries.sort((x, y) => x.playerId - y.playerId),
                 }));
 
-            const rawProj = {
-                type: 'swiss',
+            return {
+                type: 'swiss-stacks',
                 nextRoundNum: idx + 2,
-                unfinishedCount: unfinished.length,
-                truncated: unfinished.length > MAX,
-                totalScenarios: total,
-                scenarioBase: 6,
-                unfinishedMatches: capped,
-                players,
+                unfinishedCount: currentMatches.filter(m => !m.isFinished && !m.isBye).length,
+                levels,
             };
-            projectionCache = { cacheKey, rawProj };
-            return applyProjectionFilters(rawProj);
+        }
+
+        function renderStacksHTML(proj) {
+            const levelBlocks = proj.levels.map(level => {
+                const entries = showDrawOutcomes
+                    ? level.entries
+                    : level.entries.filter(e => e.kind !== 'draw');
+                if (!entries.length) return '';
+                const half = Math.ceil(entries.length / 2);
+                const renderEntry = e => {
+                    const condColor = { win: '#166534', draw: '#92400e', loss: '#991b1b', certain: '#64748b' }[e.kind];
+                    const cond = e.cond
+                        ? ` <span style="font-size:0.72rem;color:${condColor}">${esc(e.cond)}</span>`
+                        : '';
+                    const nameStyle = e.kind === 'certain' ? 'font-weight:600' : 'color:#475569';
+                    return `<div style="padding:0.15rem 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="${nameStyle}">${esc(e.name)}</span>${cond}</div>`;
+                };
+                const stackCol = (label, list) => `
+                    <div style="flex:1;min-width:0">
+                        <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;margin-bottom:0.25rem">${label}</div>
+                        ${list.map(renderEntry).join('') || '<div style="color:#cbd5e1">—</div>'}
+                    </div>`;
+                return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:0.6rem 0.9rem;margin-bottom:0.6rem">
+                    <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.4rem">${level.points} point${level.points !== 1 ? 's' : ''}</div>
+                    <div style="display:flex;gap:1.25rem">
+                        ${stackCol('Low ID stack', entries.slice(0, half))}
+                        ${stackCol('High ID stack', entries.slice(half))}
+                    </div>
+                </div>`;
+            }).join('');
+
+            const intro = `<p class="route-intro" style="margin-bottom:0.75rem">
+                Pairings are drawn within each points group: players in one stack are most
+                likely to be paired against the other stack, unless paired up or down when
+                a group has an odd number of players. The exact opponent is random — PlayHub
+                does not pair by standings order. The low/high split is by PlayHub user ID
+                and is indicative: the boundary shifts as results come in.
+            </p>`;
+            return intro + levelBlocks;
         }
 
         // Project the Top-N knockout bracket based on possible outcomes of the last Swiss round.
@@ -1739,7 +1356,7 @@
 
             if (projectionCache?.cacheKey === cacheKey) return applyProjectionFilters(projectionCache.rawProj);
 
-            const total = Math.pow(6, capped.length);
+            const total = Math.pow(5, capped.length);
             const base = allMatches.filter(m => m.isFinished);
 
             // Per bracket slot (0 = seed1 vs seedN, 1 = seed2 vs seedN-1, …):
@@ -1750,7 +1367,7 @@
                 const hypo = [...base];
                 for (let i = 0; i < capped.length; i++) {
                     const m = capped[i];
-                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW6[i]) % 6];
+                    const outcome = ALL_SWISS_OUTCOMES[Math.floor(mask / POW5[i]) % 5];
                     hypo.push({
                         ...m, isFinished: true, isDraw: outcome.isDraw,
                         winnerId: outcome.isDraw ? null : (outcome.aWins ? m.playerAId : m.playerBId),
@@ -1801,113 +1418,98 @@
                 }))
                 .sort((a, b) => (standingsOrder.get(a.playerId) ?? 999) - (standingsOrder.get(b.playerId) ?? 999));
 
-            const rawProj = { type: 'knockout-bracket', cut, totalScenarios: total, scenarioBase: 6, unfinishedCount: unfinished.length, unfinishedMatches: capped, players };
+            const rawProj = { type: 'knockout-bracket', cut, totalScenarios: total, scenarioBase: 5, unfinishedCount: unfinished.length, unfinishedMatches: capped, players };
             projectionCache = { cacheKey, rawProj };
             return applyProjectionFilters(rawProj);
         }
 
         // Project the next knockout round from the current KO state.
+        // The bracket is FIXED once the cut is made (verified 107:2 against
+        // re-seeding on upset brackets — see PAIRING.md): the first KO round
+        // folds by seed (1vN, 2vN-1, …) and later rounds follow the standard
+        // single-elimination tree — winner of bracket match i plays winner of
+        // bracket match (n-1-i). There is NO re-seeding between rounds.
         function projectNextKnockoutRound() {
             const allMatches = getAllMatches();
-            const koRounds = rounds.filter(r => !r.isSwiss);
-            let latestKoRnd = null;
-            for (const r of koRounds) if ((matchesByRound[r.id] ?? []).length > 0) latestKoRnd = r;
-            if (!latestKoRnd) return null;
+            const koRoundsWithMatches = rounds.filter(
+                r => !r.isSwiss && (matchesByRound[r.id] ?? []).length > 0
+            );
+            if (!koRoundsWithMatches.length) return null;
+            const latestKoRnd = koRoundsWithMatches[koRoundsWithMatches.length - 1];
 
             const latestKoMatches = (matchesByRound[latestKoRnd.id] ?? []).filter(m => !m.isBye);
             if (latestKoMatches.length <= 1) return null; // final — nothing to project
 
-            // Seeds from Swiss standings
+            // Seeds from Swiss standings — used only to order the FIRST KO
+            // round into bracket slots (fold: slot i holds seed i+1's match).
             const swissFinished = allMatches.filter(m => m.isSwiss && m.isFinished);
             const swissStandings = computeStandings(swissFinished, allPlayerIds, playerNames);
             sortStandings(swissStandings);
             const seedMap = new Map();
             swissStandings.forEach((s, i) => seedMap.set(s.playerId, i + 1));
             const nameOf = id => playerNames[id] ?? 'Unknown';
+            const bestSeed = m => Math.min(seedMap.get(m.playerAId) ?? 999, seedMap.get(m.playerBId) ?? 999);
 
-            const koPlayers = new Set();
-            for (const m of latestKoMatches) {
-                if (m.playerAId != null) koPlayers.add(m.playerAId);
-                if (m.playerBId != null) koPlayers.add(m.playerBId);
+            // Bracket lineage: assign each player their first-KO-round slot,
+            // then collapse slots round by round (slot j merges with slot k-1-j)
+            // up to the current round. This orders the current round's matches
+            // into true bracket order even after upsets.
+            const firstKoMatches = (matchesByRound[koRoundsWithMatches[0].id] ?? []).filter(m => !m.isBye);
+            const firstOrdered = [...firstKoMatches].sort((a, b) => bestSeed(a) - bestSeed(b));
+            const slotOfPlayer = new Map();
+            firstOrdered.forEach((m, i) => {
+                if (m.playerAId != null) slotOfPlayer.set(m.playerAId, i);
+                if (m.playerBId != null) slotOfPlayer.set(m.playerBId, i);
+            });
+            let slotsCount = firstOrdered.length;
+            const stepsToLatest = koRoundsWithMatches.indexOf(latestKoRnd);
+            for (let step = 0; step < stepsToLatest; step++) {
+                const k = slotsCount;
+                for (const [pid, s] of slotOfPlayer) slotOfPlayer.set(pid, Math.min(s, k - 1 - s));
+                slotsCount = Math.floor(k / 2);
             }
+            const slotOf = m => slotOfPlayer.get(m.playerAId) ?? slotOfPlayer.get(m.playerBId) ?? 999;
+            const bracket = [...latestKoMatches].sort((a, b) => slotOf(a) - slotOf(b));
+            const n = bracket.length;
+            if (n % 2 !== 0) return null; // malformed bracket — don't guess
 
-            // Losers from all KO rounds BEFORE the latest
-            const priorLosers = new Set();
-            for (const m of allMatches.filter(m => !m.isSwiss && m.isFinished && m.roundId !== latestKoRnd.id)) {
-                const lid = m.winnerId === m.playerAId ? m.playerBId : m.playerAId;
-                if (lid != null) priorLosers.add(lid);
-            }
-
-            const getSurvivors = (extraLosers) =>
-                [...koPlayers]
-                    .filter(pid => !priorLosers.has(pid) && !extraLosers.has(pid))
-                    .sort((a, b) => (seedMap.get(a) ?? 999) - (seedMap.get(b) ?? 999));
-
+            // Enumerate is trivial under a fixed bracket: winner of bracket[i]
+            // plays winner of bracket[n-1-i]; each match contributes 1 bit.
             const koUnfinished = latestKoMatches.filter(m => !m.isFinished);
-
-            if (koUnfinished.length === 0) {
-                const latestLosers = new Set(
-                    latestKoMatches.map(m => m.winnerId === m.playerAId ? m.playerBId : m.playerAId).filter(Boolean)
-                );
-                const survivors = getSurvivors(latestLosers);
-                if (survivors.length < 2) return null;
-                const players = [];
-                for (let i = 0; i < survivors.length / 2; i++) {
-                    const aId = survivors[i], bId = survivors[survivors.length - 1 - i];
-                    const aSeed = seedMap.get(aId) ?? '?', bSeed = seedMap.get(bId) ?? '?';
-                    players.push({ playerId: aId, name: nameOf(aId), seed: aSeed, opponents: [{ id: bId, name: nameOf(bId), seed: bSeed, count: 1, scenarios: [] }] });
-                    players.push({ playerId: bId, name: nameOf(bId), seed: bSeed, opponents: [{ id: aId, name: nameOf(aId), seed: aSeed, count: 1, scenarios: [] }] });
-                }
-                players.sort((a, b) => (seedMap.get(a.playerId) ?? 999) - (seedMap.get(b.playerId) ?? 999));
-                return { type: 'knockout-next', certain: true, totalScenarios: 1, scenarioBase: 2, unfinishedMatches: [], players };
-            }
-
-            // Enumerate unfinished KO match outcomes — build per-player pairing options
-            const MAX = 8;
-            const capped = koUnfinished.slice(0, MAX);
+            const capped = koUnfinished;
             const total = Math.pow(2, capped.length);
-            const alreadyLost = new Set(
-                latestKoMatches.filter(m => m.isFinished)
-                    .map(m => m.winnerId === m.playerAId ? m.playerBId : m.playerAId).filter(Boolean)
-            );
-
-            // slotMap: bracket slot index -> Map<"aId:bId", {aName,bName,aSeed,bSeed,count,scenarios}>
-            const slotMap = new Map();
-            for (let mask = 0; mask < total; mask++) {
-                const extraLosers = new Set(alreadyLost);
-                for (let i = 0; i < capped.length; i++) {
-                    const m = capped[i];
-                    const lid = ((mask >> i) & 1) ? m.playerBId : m.playerAId;
-                    if (lid != null) extraLosers.add(lid);
+            const bitIdx = new Map(capped.map((m, i) => [m, i]));
+            // bit=1 ⇒ player A wins (matches getRequiredConditions base-2 decoding)
+            const winnerCandidates = m => m.isFinished
+                ? [{ pid: m.winnerId, bit: null, val: 0 }]
+                : [{ pid: m.playerAId, bit: bitIdx.get(m), val: 1 },
+                   { pid: m.playerBId, bit: bitIdx.get(m), val: 0 }];
+            const scenariosWhere = (reqs) => {
+                const out = [];
+                for (let mask = 0; mask < total; mask++) {
+                    if (reqs.every(r => r.bit == null || ((mask >> r.bit) & 1) === r.val)) out.push(mask);
                 }
-                const survivors = getSurvivors(extraLosers);
-                if (survivors.length < 2) continue;
-                for (let si = 0; si < Math.floor(survivors.length / 2); si++) {
-                    const aId = survivors[si], bId = survivors[survivors.length - 1 - si];
-                    const key = `${aId}:${bId}`;
-                    if (!slotMap.has(si)) slotMap.set(si, new Map());
-                    const sm = slotMap.get(si);
-                    const prev = sm.get(key);
-                    sm.set(key, prev
-                        ? { ...prev, count: prev.count + 1, scenarios: [...prev.scenarios, mask] }
-                        : { aId, bId, aName: nameOf(aId), bName: nameOf(bId), aSeed: seedMap.get(aId) ?? '?', bSeed: seedMap.get(bId) ?? '?', count: 1, scenarios: [mask] }
-                    );
-                }
-            }
+                return out;
+            };
 
-            // Build per-player list from slot data
             const koPlayerMap = new Map();
-            for (const [, sm] of slotMap) {
-                for (const [, opt] of sm) {
-                    for (const [pid, oppId, pName, oppName, pSeed, oppSeed] of [
-                        [opt.aId, opt.bId, opt.aName, opt.bName, opt.aSeed, opt.bSeed],
-                        [opt.bId, opt.aId, opt.bName, opt.aName, opt.bSeed, opt.aSeed],
-                    ]) {
-                        if (!koPlayerMap.has(pid)) koPlayerMap.set(pid, { name: pName, seed: pSeed, oppMap: new Map() });
-                        const om = koPlayerMap.get(pid).oppMap;
-                        if (!om.has(oppId)) om.set(oppId, { id: oppId, name: oppName, seed: oppSeed, count: 0, scenarios: [] });
-                        om.get(oppId).count += opt.count;
-                        om.get(oppId).scenarios.push(...opt.scenarios);
+            for (let i = 0; i < n / 2; i++) {
+                const A = bracket[i], B = bracket[n - 1 - i];
+                for (const pc of winnerCandidates(A)) {
+                    for (const qc of winnerCandidates(B)) {
+                        if (pc.pid == null || qc.pid == null) continue;
+                        const scen = scenariosWhere([pc, qc]);
+                        for (const [pid, oppId] of [[pc.pid, qc.pid], [qc.pid, pc.pid]]) {
+                            if (!koPlayerMap.has(pid)) {
+                                koPlayerMap.set(pid, { name: nameOf(pid), seed: seedMap.get(pid) ?? '?', oppMap: new Map() });
+                            }
+                            const om = koPlayerMap.get(pid).oppMap;
+                            if (!om.has(oppId)) {
+                                om.set(oppId, { id: oppId, name: nameOf(oppId), seed: seedMap.get(oppId) ?? '?', count: 0, scenarios: [] });
+                            }
+                            om.get(oppId).count += scen.length;
+                            om.get(oppId).scenarios.push(...scen);
+                        }
                     }
                 }
             }
@@ -1918,7 +1520,11 @@
                 }))
                 .sort((a, b) => (seedMap.get(a.playerId) ?? 999) - (seedMap.get(b.playerId) ?? 999));
 
-            return { type: 'knockout-next', certain: false, totalScenarios: total, scenarioBase: 2, unfinishedCount: koUnfinished.length, unfinishedMatches: capped, players };
+            return {
+                type: 'knockout-next', certain: koUnfinished.length === 0,
+                totalScenarios: total, scenarioBase: 2,
+                unfinishedCount: koUnfinished.length, unfinishedMatches: capped, players,
+            };
         }
 
         function computeNextRoundProjection() {
@@ -1999,16 +1605,14 @@
             if (checkbox) checkbox.checked = projectionEnabled;
             const drawOpts = document.getElementById('projection-draw-opts');
             if (drawOpts) drawOpts.style.display = projectionEnabled ? 'flex' : 'none';
-            const d11 = document.getElementById('draw-11-toggle');
-            const d00 = document.getElementById('draw-00-toggle');
-            if (d11) d11.checked = drawInclude11;
-            if (d00) d00.checked = drawInclude00;
+            const drawToggle = document.getElementById('draw-toggle');
+            if (drawToggle) drawToggle.checked = showDrawOutcomes;
 
             if (!projectionEnabled) {
                 if (lastProjectionRenderKey !== 'disabled') {
                     lastProjectionRenderKey = 'disabled';
                     titleEl.textContent = 'Next Round Projection';
-                    container.innerHTML = '<div class="proj-placeholder">Tick "Calculate pairings" to see possible opponents and required results</div>';
+                    container.innerHTML = '<div class="proj-placeholder">Tick "Calculate pairings" to see next-round points groups and bracket projections</div>';
                 }
                 return;
             }
@@ -2021,7 +1625,7 @@
             const renderKey = [
                 swissRnd?.id ?? '', roundFingerprints[swissRnd?.id] ?? '',
                 latestKoRnd?.id ?? '', roundFingerprints[latestKoRnd?.id] ?? '',
-                drawInclude11, drawInclude00
+                showDrawOutcomes
             ].join('|');
             if (renderKey === lastProjectionRenderKey) return;
             lastProjectionRenderKey = renderKey;
@@ -2037,11 +1641,13 @@
                     return;
                 }
 
-                if (proj.type === 'swiss') {
+                if (proj.type === 'swiss-stacks') {
                     const note = proj.unfinishedCount > 0
-                        ? ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress · ${proj.totalScenarios.toLocaleString()} scenario${proj.totalScenarios !== 1 ? 's' : ''}${proj.truncated ? '+' : ''}</span>`
+                        ? ` <span class="section-note">${proj.unfinishedCount} match${proj.unfinishedCount !== 1 ? 'es' : ''} in progress</span>`
                         : ` <span class="section-note">Round ${proj.nextRoundNum - 1} complete</span>`;
-                    titleEl.innerHTML = `Round ${proj.nextRoundNum} Projection${note}`;
+                    titleEl.innerHTML = `Round ${proj.nextRoundNum} Points Groups${note}`;
+                    container.innerHTML = renderStacksHTML(proj);
+                    return;
 
                 } else if (proj.type === 'knockout-bracket') {
                     const note = proj.unfinishedCount > 0
@@ -2059,6 +1665,8 @@
                 const accordion = proj.players.map(p => renderProjectionPlayer(p, proj)).join('');
                 const footer = proj.type === 'knockout-bracket'
                     ? `<p class="route-intro" style="margin-top:0.5rem">Seeds based on Swiss standings — tiebreakers may shift positions.</p>`
+                    : proj.type === 'knockout-next'
+                    ? `<p class="route-intro" style="margin-top:0.5rem">Fixed single-elimination bracket — set when the cut was made, no re-seeding between rounds.</p>`
                     : '';
                 container.innerHTML = `<div class="proj-accordion">${accordion}</div>${footer}`;
             }, 0);
@@ -2393,7 +2001,7 @@
             pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
-            isEventComplete = false; activeRoutePlayerId = null; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; projectionCache = null; lastProjectionRenderKey = null;
+            isEventComplete = false; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; showDrawOutcomes = true; projectionCache = null; lastProjectionRenderKey = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
             document.title = 'Watch Event — Set Championships';
 
@@ -2500,12 +2108,8 @@
                 document.getElementById('projection-draw-opts').style.display = projectionEnabled ? 'flex' : 'none';
                 renderNextRoundProjection();
             });
-            document.getElementById('draw-11-toggle').addEventListener('change', e => {
-                drawInclude11 = e.target.checked;
-                if (projectionEnabled) renderNextRoundProjection();
-            });
-            document.getElementById('draw-00-toggle').addEventListener('change', e => {
-                drawInclude00 = e.target.checked;
+            document.getElementById('draw-toggle').addEventListener('change', e => {
+                showDrawOutcomes = e.target.checked;
                 if (projectionEnabled) renderNextRoundProjection();
             });
 
