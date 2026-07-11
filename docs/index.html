@@ -416,14 +416,17 @@
         function buildTypeChips() {
             const row = document.getElementById('type-filter-row');
             allTypes = [...new Set(allRows.map(r => r['Type'] || '').filter(Boolean))];
-            activeTypes = new Set(allTypes);
+            // Restore deselected types from prefs; types not in the stored list
+            // (including ones first seen in this CSV) default to active
+            const hidden = loadPrefs().hiddenTypes || [];
+            activeTypes = new Set(allTypes.filter(t => !hidden.includes(t)));
             if (allTypes.length < 2) {
                 row.style.display = 'none';
                 row.innerHTML = '';
                 return;
             }
             row.innerHTML = '<span class="type-chip-label">Type:</span>' + allTypes.map(t =>
-                `<button type="button" class="type-chip active" data-type="${esc(t)}">${esc(t)}</button>`
+                `<button type="button" class="type-chip${activeTypes.has(t) ? ' active' : ''}" data-type="${esc(t)}">${esc(t)}</button>`
             ).join('');
             row.style.display = '';
             row.querySelectorAll('.type-chip').forEach(btn => {
@@ -432,9 +435,18 @@
                     if (activeTypes.has(t)) activeTypes.delete(t);
                     else activeTypes.add(t);
                     btn.classList.toggle('active', activeTypes.has(t));
+                    saveTypePrefs();
                     renderTable();
                 });
             });
+        }
+
+        function saveTypePrefs() {
+            // Keep stored hidden types that aren't in the current CSV (they may
+            // belong to another postcode's CSV) and re-derive the rest
+            const kept = (loadPrefs().hiddenTypes || []).filter(t => !allTypes.includes(t));
+            const hidden = allTypes.filter(t => !activeTypes.has(t));
+            savePrefs({ hiddenTypes: [...kept, ...hidden] });
         }
 
         function typeFiltered(rows) {
