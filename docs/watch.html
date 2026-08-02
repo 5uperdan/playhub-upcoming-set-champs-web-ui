@@ -58,6 +58,7 @@
             <!-- Status / refresh bar -->
             <div class="status-bar" id="status-bar">
                 <span id="last-updated-text"></span>
+                <span id="refresh-error-note" class="refresh-error-note" style="display:none"></span>
                 <button class="refresh-btn" id="refresh-btn">↻ Refresh now</button>
                 <div class="countdown-wrap" id="countdown-wrap" style="display:none">
                     <span id="countdown-label">Next refresh in <span id="countdown-secs">–</span>s</span>
@@ -186,6 +187,8 @@
         let isRefreshing = false;
         let pollCount = 0;             // incremented every doPoll call; reset after each integrity check
         let roundFingerprints = {};    // roundId → fingerprint string of finished match results
+        let lastSuccessAt = null;      // Date of the last successful fetch — the "Updated" time
+        let consecutivePollFailures = 0; // >0 ⇒ show the "last refresh failed" note
 
         // ═══════════════════════════════════════════════════════════
         //  Round fingerprint: a compact string of all finished match
@@ -1813,9 +1816,22 @@
         //  Status bar (last updated + countdown)
         // ═══════════════════════════════════════════════════════════
         function updateStatusBar() {
-            const now = new Date();
+            // Timestamp the last SUCCESSFUL fetch, not the current time — a failed
+            // refresh must not claim the data is fresh.
+            const stamp = lastSuccessAt ?? new Date();
             document.getElementById('last-updated-text').textContent =
-                `Updated ${now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+                `Updated ${stamp.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+
+            const noteEl = document.getElementById('refresh-error-note');
+            if (consecutivePollFailures > 0) {
+                noteEl.textContent = consecutivePollFailures === 1
+                    ? '⚠ last refresh failed'
+                    : `⚠ last ${consecutivePollFailures} refreshes failed`;
+                noteEl.title = 'Showing the data from the last successful refresh. Retrying automatically.';
+                noteEl.style.display = '';
+            } else {
+                noteEl.style.display = 'none';
+            }
 
             if (isEventComplete) {
                 document.getElementById('countdown-wrap').style.display = 'none';
@@ -2004,7 +2020,12 @@
 
             try {
                 await pollUpdate();
+                lastSuccessAt = new Date();
+                consecutivePollFailures = 0;
             } catch (err) {
+                // Keep showing the last good data — polling continues, so a blip
+                // clears itself on the next successful refresh.
+                consecutivePollFailures++;
                 console.warn('Poll failed:', err);
             } finally {
                 isRefreshing = false;
@@ -2063,6 +2084,8 @@
                 // Fetch match data for all rounds
                 setLoadingMsg('Fetching match data…');
                 await fetchAllRoundData();
+                lastSuccessAt = new Date();
+                consecutivePollFailures = 0;
 
                 // Show app
                 document.getElementById('loading').style.display = 'none';
@@ -2092,6 +2115,7 @@
             if (pollTimer) clearTimeout(pollTimer);
             if (countdownInterval) clearInterval(countdownInterval);
             pollTimer = null; nextPollAt = null; isRefreshing = false; pollCount = 0;
+            lastSuccessAt = null; consecutivePollFailures = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
             isEventComplete = false; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; showDrawOutcomes = true; lastProjectionRenderKey = null;
