@@ -1320,40 +1320,41 @@
 
         // ── Live top-cut bracket preview (final Swiss round in progress) ──
         // Pairing during the final Swiss round is itself random (see PAIRING.md),
-        // so there is nothing meaningful to predict about IT. What's useful is a
-        // preview of the KO bracket that's about to start: fold the CURRENT
-        // standings (all matches finished so far, including whatever of the final
-        // round has been reported) into the fixed single-elimination bracket shape.
-        // No scenario enumeration — the round-1 slots simply reflect the latest
-        // known standings and are redrawn as each final-round match reports.
-        // Rounds beyond the first are undetermined until their own matches are
-        // played, so they're shown as bracket-shaped placeholders only.
-        function buildBracketRounds(cut, seededPlayers) {
-            const rounds = [];
-            let matches = [];
-            const h = cut / 2;
-            for (let i = 0; i < h; i++) {
-                const a = seededPlayers[i] ?? null;
-                const b = seededPlayers[cut - 1 - i] ?? null;
-                matches.push({
-                    aId: a?.playerId ?? null, aName: a?.name ?? null, aSeed: i + 1,
-                    bId: b?.playerId ?? null, bName: b?.name ?? null, bSeed: cut - i,
-                    known: true,
-                });
-            }
-            rounds.push(matches);
-            let m = matches.length;
-            let roundIdx = 1;
-            while (m > 1) {
-                const next = [];
-                for (let i = 0; i < m / 2; i++) {
-                    next.push({ fromA: i, fromB: m - 1 - i, roundIdx, known: false });
+        // so there is nothing meaningful to predict about IT. But WHO lands in
+        // which bracket slot is deterministic given results, so the remaining
+        // final-round matches are enumerated (5 outcomes each, like safe-to-ID;
+        // 4 when draw outcomes are toggled off) and each round-1 slot lists
+        // every player who occupies it in some scenario, with the results
+        // required. Matches that can't put either player into the cut are
+        // pruned (they only nudge tiebreakers), and at most 6 matches are
+        // enumerated. Rounds beyond the first are undetermined until their own
+        // matches are played, so they're shown as bracket-shaped placeholders.
+
+        // Per unfinished match, summarise the outcomes shared by every scenario
+        // mask in the subset. Returns necessary conditions ("X beats Y", "X
+        // beats Y or they draw"); a match where all outcome kinds appear
+        // contributes nothing.
+        function summarizeMaskConditions(masks, matches, outcomes) {
+            const base = outcomes.length;
+            const conds = [];
+            for (let i = 0; i < matches.length; i++) {
+                const m = matches[i];
+                const kinds = new Set();
+                for (const mask of masks) {
+                    const o = outcomes[Math.floor(mask / Math.pow(base, i)) % base];
+                    kinds.add(o.isDraw ? 'D' : (o.aWins ? 'A' : 'B'));
                 }
-                rounds.push(next);
-                m = next.length;
-                roundIdx++;
+                const drawPossible = outcomes.some(o => o.isDraw);
+                if (kinds.has('A') && kinds.has('B') && (!drawPossible || kinds.has('D'))) continue;
+                const aN = playerNames[m.playerAId] ?? '?', bN = playerNames[m.playerBId] ?? '?';
+                if (kinds.has('A') && kinds.has('D')) conds.push(`${aN} beats ${bN} or they draw`);
+                else if (kinds.has('B') && kinds.has('D')) conds.push(`${bN} beats ${aN} or they draw`);
+                else if (kinds.has('A') && kinds.has('B')) conds.push(`${aN} and ${bN} don't draw`);
+                else if (kinds.has('A')) conds.push(`${aN} beats ${bN}`);
+                else if (kinds.has('B')) conds.push(`${bN} beats ${aN}`);
+                else conds.push(`${aN} and ${bN} draw`);
             }
-            return rounds;
+            return conds;
         }
 
         function computeLiveBracketPreview() {
@@ -1362,36 +1363,126 @@
 
             const currentRnd = latestSwissRoundInfo();
             const currentMatches = currentRnd ? (matchesByRound[currentRnd.id] ?? []) : [];
-            const unfinishedCount = currentMatches.filter(m => !m.isFinished && !m.isBye).length;
+            const unfinishedAll = currentMatches.filter(m =>
+                !m.isFinished && !m.isBye && m.playerAId != null && m.playerBId != null);
+            const unfinishedCount = unfinishedAll.length;
 
             const finished = getAllMatches().filter(m => m.isFinished);
-            const standings = computeStandings(finished, allPlayerIds, playerNames);
-            sortStandings(standings);
             const activeIds = computeActivePlayerIds();
-            const top = standings.filter(s => activeIds.has(s.playerId)).slice(0, cut);
 
-            const rounds = buildBracketRounds(cut, top);
+            // Prune matches where neither player can reach the current bubble
+            // (cut-th place) points even with a win — those can only nudge
+            // tiebreakers. Then keep the 6 most threatening (highest-placed).
+            const baseStandings = computeStandings(finished, allPlayerIds, playerNames);
+            sortStandings(baseStandings);
+            const activeStandings = baseStandings.filter(s => activeIds.has(s.playerId));
+            const bubblePts = activeStandings[Math.min(cut, activeStandings.length) - 1]?.points ?? 0;
+            const pointsMap = new Map(baseStandings.map(s => [s.playerId, s.points]));
+            const relevant = unfinishedAll.filter(m =>
+                (pointsMap.get(m.playerAId) ?? 0) + 3 >= bubblePts ||
+                (pointsMap.get(m.playerBId) ?? 0) + 3 >= bubblePts);
+            relevant.sort((a, b) =>
+                Math.max(pointsMap.get(b.playerAId) ?? 0, pointsMap.get(b.playerBId) ?? 0) -
+                Math.max(pointsMap.get(a.playerAId) ?? 0, pointsMap.get(a.playerBId) ?? 0));
+            const MAX = 6;
+            const capped = relevant.slice(0, MAX);
+            const truncated = relevant.length > MAX;
+
+            const outcomes = showDrawOutcomes ? ALL_SWISS_OUTCOMES : SWISS_WIN_OUTCOMES;
+            const base = outcomes.length;
+            const total = Math.pow(base, capped.length);
+
+            // Enumerate: per scenario, fold the resulting top cut into slots and
+            // record which player occupies each slot side.
+            const half = cut / 2;
+            const slotOcc = Array.from({ length: half }, () => ({ a: new Map(), b: new Map() }));
+            for (let mask = 0; mask < total; mask++) {
+                const hypo = [...finished];
+                for (let i = 0; i < capped.length; i++) {
+                    const m = capped[i];
+                    const o = outcomes[Math.floor(mask / Math.pow(base, i)) % base];
+                    hypo.push({
+                        ...m, isFinished: true, isDraw: o.isDraw,
+                        winnerId: o.isDraw ? null : (o.aWins ? m.playerAId : m.playerBId),
+                        playerAScore: o.aScore, playerBScore: o.bScore,
+                    });
+                }
+                const st = computeStandings(hypo, allPlayerIds, playerNames);
+                sortStandings(st);
+                const top = st.filter(s => activeIds.has(s.playerId)).slice(0, cut);
+                for (let i = 0; i < half; i++) {
+                    for (const [side, pid] of [['a', top[i]?.playerId], ['b', top[cut - 1 - i]?.playerId]]) {
+                        if (pid == null) continue;
+                        const occ = slotOcc[i][side];
+                        if (!occ.has(pid)) occ.set(pid, []);
+                        occ.get(pid).push(mask);
+                    }
+                }
+            }
+
+            const candList = occ => [...occ.entries()]
+                .map(([pid, masks]) => ({
+                    pid, name: playerNames[pid] ?? 'Unknown', count: masks.length,
+                    conds: masks.length === total ? [] : summarizeMaskConditions(masks, capped, outcomes),
+                }))
+                .sort((x, y) => y.count - x.count);
+
+            const round1 = [];
+            for (let i = 0; i < half; i++) {
+                round1.push({
+                    known: true, aSeed: i + 1, bSeed: cut - i,
+                    aCands: candList(slotOcc[i].a), bCands: candList(slotOcc[i].b),
+                });
+            }
+            const bracketRounds = [round1];
+            let m = half, roundIdx = 1;
+            while (m > 1) {
+                const next = [];
+                for (let i = 0; i < m / 2; i++) {
+                    next.push({ fromA: i, fromB: m - 1 - i, roundIdx, known: false });
+                }
+                bracketRounds.push(next);
+                m = next.length;
+                roundIdx++;
+            }
             // Round labels, largest cut first: "Top 8", "Top 4", "Final"
             const labels = [];
             for (let n = cut; n >= 2; n = n / 2) labels.push(n === 2 ? 'Final' : `Top ${n}`);
 
             return {
-                type: 'bracket-preview', cut, rounds, labels, unfinishedCount,
+                type: 'bracket-preview', cut, rounds: bracketRounds, labels,
+                unfinishedCount, totalScenarios: total, truncated,
+                enumeratedCount: capped.length,
                 complete: unfinishedCount === 0,
+                settled: round1.every(s => s.aCands.length === 1 && s.bCands.length === 1),
             };
         }
 
         function renderBracketPreviewHTML(proj) {
-            const nameOrTbd = (name, seed) => name != null
-                ? `<span class="seed-badge" style="margin-right:0.35rem">${seed}</span>${esc(name)}`
-                : `<span style="color:#cbd5e1">TBD</span>`;
+            const seedSpan = seed => `<span class="seed-badge" style="margin-right:0.35rem">${seed}</span>`;
+            const slotHtml = (seed, cands) => {
+                if (!cands.length) {
+                    return `<div class="bracket-slot">${seedSpan(seed)}<span style="color:#cbd5e1">TBD</span></div>`;
+                }
+                if (cands.length === 1) {
+                    return `<div class="bracket-slot">${seedSpan(seed)}${esc(cands[0].name)}</div>`;
+                }
+                const rows = cands.map(c => {
+                    const cond = c.conds.length
+                        ? `<div class="bracket-cand-cond">if ${esc(c.conds.join(' and '))}</div>`
+                        : '';
+                    return `<div class="bracket-cand">${esc(c.name)}
+                        <span class="proj-chip possible">${c.count} of ${proj.totalScenarios}</span>${cond}</div>`;
+                }).join('');
+                return `<div class="bracket-slot contested">${seedSpan(seed)}<div style="min-width:0;flex:1">${rows}</div></div>`;
+            };
 
             const columns = proj.rounds.map((matches, ri) => {
                 const boxes = matches.map(m => {
                     if (m.known) {
                         return `<div class="bracket-match">
-                            <div class="bracket-slot">${nameOrTbd(m.aName, m.aSeed)}</div>
-                            <div class="bracket-slot">${nameOrTbd(m.bName, m.bSeed)}</div>
+                            ${slotHtml(m.aSeed, m.aCands)}
+                            ${slotHtml(m.bSeed, m.bCands)}
                         </div>`;
                     }
                     return `<div class="bracket-match">
@@ -1405,12 +1496,23 @@
                 </div>`;
             }).join('');
 
-            const note = proj.complete
-                ? `Final round complete — this is the confirmed Top ${proj.cut} bracket.`
-                : `Round 1 reflects current standings and updates as each remaining match in the final Swiss round is reported. Later rounds are undetermined until their own matches are played.`;
+            let note;
+            if (proj.complete) {
+                note = `Final round complete — this is the confirmed Top ${proj.cut} bracket.`;
+            } else if (proj.settled) {
+                note = `The remaining final-round result${proj.unfinishedCount !== 1 ? 's' : ''} cannot change these round-1 slots. Later rounds are undetermined until their own matches are played.`;
+            } else {
+                note = `Slots with multiple names list every player who can finish there across the ${proj.totalScenarios} remaining outcome combination${proj.totalScenarios !== 1 ? 's' : ''}, with the results required. Later rounds are undetermined until their own matches are played.`;
+            }
+            const extraNotes = [];
+            if (proj.enumeratedCount < proj.unfinishedCount && !proj.complete) {
+                extraNotes.push(proj.truncated
+                    ? `Only the 6 most cut-relevant unfinished matches are enumerated.`
+                    : `${proj.unfinishedCount - proj.enumeratedCount} unfinished match${proj.unfinishedCount - proj.enumeratedCount !== 1 ? 'es' : ''} between players out of contention ${proj.unfinishedCount - proj.enumeratedCount !== 1 ? 'are' : 'is'} ignored (can only nudge tiebreakers).`);
+            }
 
             return `<div class="bracket-wrap">${columns}</div>
-                <p class="route-intro" style="margin-top:0.5rem">${note}</p>`;
+                <p class="route-intro" style="margin-top:0.5rem">${note}${extraNotes.length ? ' ' + extraNotes.join(' ') : ''}</p>`;
         }
 
         // Project the next knockout round from the current KO state.

@@ -1339,6 +1339,27 @@ tr.cut-divider td {
     font-style: italic;
 }
 
+/* Slot with multiple possible occupants (final Swiss round still playing) */
+.bracket-slot.contested {
+    white-space: normal;
+    display: flex;
+    gap: 0.35rem;
+    align-items: flex-start;
+}
+
+.bracket-cand {
+    padding: 0.1rem 0;
+}
+
+.bracket-cand .proj-chip {
+    margin-left: 0.25rem;
+}
+
+.bracket-cand-cond {
+    font-size: 0.72rem;
+    color: #64748b;
+}
+
 @media (max-width: 640px) {
     .event-info-bar {
         padding: 0.5rem 0.75rem;
