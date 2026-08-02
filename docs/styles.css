@@ -546,6 +546,111 @@ td.numeric {
     color: #1e293b;
 }
 
+/* ── Map view ── */
+#map-section {
+    /* Creates a stacking context so Leaflet's internal z-indexes (panes 200-700,
+       popups 1000) stay contained and can't paint over the sticky .day-nav-wrap
+       (z-index 30). position:relative alone is NOT enough — z-index:auto does not
+       establish a stacking context. */
+    position: relative;
+    z-index: 0;
+    margin-bottom: 1.75rem;
+}
+
+#map {
+    height: 620px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #f8fafc;
+}
+
+.map-note {
+    margin-top: 0.5rem;
+    font-size: 0.85rem;
+    color: #64748b;
+    line-height: 1.4;
+}
+
+/* Events with no coordinates are invisible on the map, so this must be
+   impossible to miss — unlike .map-note it is coloured, boxed and sits above
+   the map rather than below it. */
+.map-warning {
+    margin-bottom: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    color: #92400e;
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
+.home-pin {
+    font-size: 19px;
+    line-height: 26px;
+    text-align: center;
+    filter: drop-shadow(0 1px 2px rgba(15, 23, 42, 0.35));
+}
+
+/* Leaflet ships its own font stack on .leaflet-container — bring popups back
+   in line with the rest of the page. */
+.leaflet-popup-content {
+    font: inherit;
+    margin: 0.75rem 0.9rem;
+}
+
+.map-popup {
+    font-size: 0.85rem;
+}
+
+.map-pop-venue {
+    font-weight: 700;
+    color: #1e293b;
+    margin-bottom: 0.15rem;
+}
+
+.map-pop-meta {
+    color: #64748b;
+    font-size: 0.78rem;
+    margin-bottom: 0.4rem;
+}
+
+.map-pop-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.map-pop-event {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    align-items: flex-start;
+    border-top: 1px solid #f1f5f9;
+    padding-top: 0.35rem;
+}
+
+.map-pop-date {
+    font-weight: 600;
+    color: #334155;
+    font-size: 0.82rem;
+}
+
+.map-pop-links a {
+    color: #2563eb;
+    text-decoration: none;
+    font-size: 0.78rem;
+}
+
+.map-pop-links a:hover {
+    text-decoration: underline;
+}
+
 /* ── Sort select ── */
 .sort-select {
     padding: 0.4rem 0.5rem;
@@ -613,6 +718,15 @@ td.numeric {
 @media (max-width: 640px) {
     header {
         padding: 0 0.75rem;
+    }
+
+    #map {
+        height: 70vh;
+        min-height: 320px;
+    }
+
+    .map-pop-list {
+        max-height: 160px;
     }
 
     .results-header {

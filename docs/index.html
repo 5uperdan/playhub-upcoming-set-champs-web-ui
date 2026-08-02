@@ -5,6 +5,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Upcoming Set Championships</title>
+    <!-- Leaflet must come BEFORE styles.css: it ships `.leaflet-container a` at the
+         same specificity as our popup link rules, so source order breaks the tie.
+         No `defer` — the inline script below runs during parsing and needs `L`. -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <link rel="stylesheet" href="styles.css">
 
 </head>
@@ -74,6 +81,7 @@
                 <div class="view-toggle">
                     <button id="btn-table-view" class="toggle-btn">Table</button>
                     <button id="btn-card-view" class="toggle-btn">Cards</button>
+                    <button id="btn-map-view" class="toggle-btn">Map</button>
                 </div>
                 <span id="event-count" class="count-label"></span>
             </div>
@@ -104,6 +112,18 @@
                     <p id="cat-fact-text"></p>
                     <button id="cat-fact-btn" class="cat-fact-btn">New fact</button>
                 </div>
+            </div>
+
+            <!-- Map view. Deliberately a SIBLING of #days-container, which gets its
+                 innerHTML replaced on every render — keeping the map outside means the
+                 single Leaflet instance is never destroyed and can't leak. -->
+            <div id="map-section" style="display:none">
+                <!-- Warning sits ABOVE the map: an event that can't be plotted is
+                     invisible, so the user must be told without having to scroll past
+                     the map to find out. -->
+                <p id="map-warning" class="map-warning" style="display:none"></p>
+                <div id="map"></div>
+                <p id="map-note" class="map-note"></p>
             </div>
 
             <div id="days-container"></div>
@@ -202,8 +222,17 @@
         let filterText = '';
         let sortCol = 'travel';
         let sortDir = 1;
-        let viewMode = 'table'; // 'table' or 'card'
+        let viewMode = 'table'; // 'table', 'card' or 'map'
         let recentCollapsed = false;
+
+        // ── Map view state ──
+        const UK_CENTRE = [54.5, -3.0];
+        let venueCoords = null;         // {"MK10 0BA": [lat, lon]} — null until fetched
+        let venueCoordsPromise = null;  // in-flight fetch, shared across postcode switches
+        let leafletMap = null;          // L.Map — created once, never destroyed
+        let markerLayer = null;         // L.LayerGroup — cleared and refilled on every render
+        let currentOrigin = '';         // normalised origin postcode, for the home marker
+        let selectedDay = null;         // ISO date, or null for all days (map view only)
 
         // ═══════════════════════════════════════════════════════════
         //  Preferences (localStorage)
@@ -224,6 +253,8 @@
         async function loadEventData(postcode) {
             const norm = normalisePostcode(postcode);
             const filename = csvFilename(norm);
+            currentOrigin = norm;
+            selectedDay = null;   // day choice belongs to the previous event set
 
             showLoading();
             try {
@@ -258,12 +289,174 @@
                 } else {
                     updatedEl.textContent = '';
                 }
+                loadVenueCoords();   // warm the cache while the user is on the table
                 showResults();
                 renderTable();
             } catch (err) {
                 showEntry();
                 showEntryError(err.message);
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Map view
+        // ═══════════════════════════════════════════════════════════
+
+        // Coordinates are postcode-independent, so this is fetched at most once
+        // per page load no matter how many times the origin postcode changes.
+        function loadVenueCoords() {
+            if (venueCoordsPromise) return venueCoordsPromise;
+            venueCoordsPromise = fetch('venue-coords.json')
+                .then(r => r.ok ? r.json() : {})
+                .then(data => { venueCoords = (data && typeof data === 'object') ? data : {}; })
+                .catch(() => { venueCoords = {}; });
+            return venueCoordsPromise;
+        }
+
+        function ensureMap() {
+            if (leafletMap) return leafletMap;
+            if (typeof L === 'undefined') return null;
+            leafletMap = L.map('map', { scrollWheelZoom: true }).setView(UK_CENTRE, 5);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(leafletMap);
+            markerLayer = L.layerGroup().addTo(leafletMap);
+            return leafletMap;
+        }
+
+        function groupRowsByVenue(rows) {
+            const groups = new Map();
+            for (const r of rows) {
+                const pc = normalisePostcode(r['Postcode'] || '');
+                const key = (r['Venue'] || '') + '|' + pc;
+                let g = groups.get(key);
+                if (!g) {
+                    g = { venue: r['Venue'] || 'Unknown venue', postcode: pc, rows: [] };
+                    groups.set(key, g);
+                }
+                g.rows.push(r);
+            }
+            return [...groups.values()];
+        }
+
+        function venuePopupHtml(g) {
+            // Every event in a group shares a venue, so travel time is identical and
+            // sortRows() would be a no-op — order by date instead.
+            const events = [...g.rows].sort((a, b) => (a['Date'] || '').localeCompare(b['Date'] || ''));
+            const travel = events[0]['Travel time'] || '';
+            const items = events.map(r => {
+                const eid = extractEventId(r['Event link']);
+                const links = [];
+                if (r['Event link']) links.push(`<a href="${esc(r['Event link'])}" target="_blank" rel="noopener">PlayHub</a>`);
+                if (eid) links.push(`<a href="watch.html?id=${eid}">Watch</a>`);
+                if (r['Route link']) links.push(`<a href="${esc(r['Route link'])}" target="_blank" rel="noopener">Directions</a>`);
+                return `<li class="map-pop-event">
+                    <span class="map-pop-date">${esc(formatDate(r['Date']))}</span>
+                    ${r['Type'] ? typeBadge(r['Type']) : ''}
+                    ${links.length ? `<span class="map-pop-links">${links.join(' · ')}</span>` : ''}
+                </li>`;
+            }).join('');
+            return `<div class="map-popup">
+                <div class="map-pop-venue">${esc(g.venue)}</div>
+                <div class="map-pop-meta">${esc(g.postcode)}${travel && travel !== 'N/A' ? ' · ' + esc(travel) + ' drive' : ''}</div>
+                <ul class="map-pop-list">${items}</ul>
+            </div>`;
+        }
+
+        function renderMap(rows) {
+            const noteEl = document.getElementById('map-note');
+
+            if (venueCoords === null) {
+                noteEl.textContent = 'Loading map data…';
+                loadVenueCoords().then(() => { if (viewMode === 'map') renderTable(); });
+                return;
+            }
+            const map = ensureMap();
+            if (!map) {
+                noteEl.textContent = 'The map library could not be loaded. Try the Table or Cards view.';
+                return;
+            }
+            // The container was display:none until applyViewVisibility() ran a moment
+            // ago, so Leaflet still has stale dimensions cached. Recompute them before
+            // fitBounds, or the fit is calculated against the wrong size.
+            map.invalidateSize();
+            markerLayer.clearLayers();
+
+            const bounds = [];
+            const used = new Set();
+            let placedVenues = 0, placedEvents = 0, missingEvents = 0;
+            const missingVenues = new Set();
+
+            for (const g of groupRowsByVenue(rows)) {
+                const c = venueCoords[g.postcode];
+                if (!Array.isArray(c) || c.length !== 2) {
+                    missingEvents += g.rows.length;
+                    missingVenues.add(g.venue);
+                    continue;
+                }
+                let lat = c[0], lon = c[1], key = lat + ',' + lon;
+                // Two venues can share a postcode — nudge duplicates so both stay clickable
+                while (used.has(key)) { lat += 0.0004; lon += 0.0004; key = lat + ',' + lon; }
+                used.add(key);
+
+                L.circleMarker([lat, lon], {
+                    radius: g.rows.length > 1 ? 9 : 7,
+                    color: '#1e293b', weight: 1.5,
+                    fillColor: '#2563eb', fillOpacity: 0.85
+                })
+                    .bindPopup(venuePopupHtml(g), { maxWidth: 320, minWidth: 220 })
+                    .bindTooltip(`${g.venue} (${g.rows.length})`, { direction: 'top' })
+                    .addTo(markerLayer);
+
+                bounds.push([lat, lon]);
+                placedVenues++;
+                placedEvents += g.rows.length;
+            }
+
+            const home = venueCoords[currentOrigin];
+            if (Array.isArray(home) && home.length === 2) {
+                L.marker(home, {
+                    icon: L.divIcon({ className: 'home-pin', html: '🏠', iconSize: [26, 26], iconAnchor: [13, 13] }),
+                    zIndexOffset: 1000, keyboard: false
+                })
+                    .bindPopup(`<div class="map-popup"><div class="map-pop-venue">Your starting point</div>
+                        <div class="map-pop-meta">${esc(currentOrigin)}</div></div>`)
+                    .addTo(markerLayer);
+                bounds.push(home);
+            }
+
+            // fitBounds throws on an empty list
+            if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.12), { maxZoom: 12 });
+            else map.setView(UK_CENTRE, 5);
+
+            noteEl.textContent = rows.length
+                ? `Showing ${placedEvents} event${placedEvents !== 1 ? 's' : ''} at ` +
+                  `${placedVenues} venue${placedVenues !== 1 ? 's' : ''}.`
+                : 'No events match your filter.';
+
+            // Events without coordinates are INVISIBLE on the map — never let that pass
+            // silently. Warn prominently, name the venues, and say where to see them.
+            const warnEl = document.getElementById('map-warning');
+            if (missingEvents) {
+                warnEl.textContent =
+                    `⚠ ${missingEvents} event${missingEvents !== 1 ? 's' : ''} not shown on the map — ` +
+                    `no location found for ${missingVenues.size} venue` +
+                    `${missingVenues.size !== 1 ? 's' : ''}: ${[...missingVenues].sort().join(', ')}. ` +
+                    `Switch to Table or Cards view to see ${missingEvents !== 1 ? 'them' : 'it'}.`;
+                warnEl.style.display = '';
+            } else {
+                warnEl.style.display = 'none';
+            }
+        }
+
+        function applyViewVisibility() {
+            const isMap = viewMode === 'map';
+            document.getElementById('map-section').style.display = isMap ? '' : 'none';
+            document.getElementById('days-container').style.display = isMap ? 'none' : '';
+            // renderRecentEvents emits a table unless viewMode is 'card', which would
+            // appear as an unrelated table under the map.
+            if (isMap) document.getElementById('recent-section').style.display = 'none';
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -465,6 +658,21 @@
                 nav.innerHTML = '';
                 return;
             }
+            if (viewMode === 'map') {
+                // In map view this control filters rather than scrolls — options are
+                // valued by ISO date and drive selectedDay.
+                const options = dates.map(date =>
+                    `<option value="${esc(date)}"${date === selectedDay ? ' selected' : ''}>${esc(formatDate(date))}</option>`
+                ).join('');
+                nav.innerHTML = `<div class="day-nav-inner"><span class="day-nav-label">Show day:</span><select id="day-nav-select" class="day-nav-select"><option value="">All days</option>${options}</select></div>`;
+                document.getElementById('day-nav-select').addEventListener('change', e => {
+                    selectedDay = e.target.value || null;
+                    renderTable();
+                });
+                nav.style.display = '';
+                return;
+            }
+
             const options = dates.map((date, idx) =>
                 `<option value="day-${idx}">${esc(formatDate(date))}</option>`
             ).join('');
@@ -575,7 +783,8 @@
         }
 
         function renderTable() {
-            renderRecentEvents(typeFiltered(allRows));
+            applyViewVisibility();
+            if (viewMode !== 'map') renderRecentEvents(typeFiltered(allRows));
             let rows = typeFiltered(allRows);
 
             // Filter
@@ -590,6 +799,22 @@
             const container = document.getElementById('days-container');
             const countEl = document.getElementById('event-count');
             countEl.textContent = `${rows.length} event${rows.length !== 1 ? 's' : ''}`;
+
+            // Map view sits ABOVE the zero-rows early return, so an empty filter still
+            // clears the markers instead of leaving stale pins on screen.
+            if (viewMode === 'map') {
+                // Day options come from the type/text-filtered rows BEFORE the day filter
+                // is applied — otherwise picking a day would collapse the dropdown to it.
+                const dayDates = [...new Set(rows.map(r => r['Date'] || ''))];
+                if (selectedDay && !dayDates.includes(selectedDay)) selectedDay = null;
+                renderDayNav(dayDates);
+
+                const mapRows = selectedDay ? rows.filter(r => r['Date'] === selectedDay) : rows;
+                countEl.textContent = `${mapRows.length} event${mapRows.length !== 1 ? 's' : ''}`;
+                container.innerHTML = '';
+                renderMap(mapRows);
+                return;
+            }
 
             if (!rows.length) {
                 renderDayNav([]);
@@ -691,11 +916,17 @@
             savePrefs({ view: mode });
             document.getElementById('btn-table-view').classList.toggle('active', mode === 'table');
             document.getElementById('btn-card-view').classList.toggle('active', mode === 'card');
+            document.getElementById('btn-map-view').classList.toggle('active', mode === 'map');
+            // Must run before renderTable so the map container is laid out by the time
+            // invalidateSize() is called.
+            applyViewVisibility();
+            if (mode === 'map') loadVenueCoords();
             if (allRows.length) renderTable();
         }
 
         document.getElementById('btn-table-view').addEventListener('click', () => setView('table'));
         document.getElementById('btn-card-view').addEventListener('click', () => setView('card'));
+        document.getElementById('btn-map-view').addEventListener('click', () => setView('map'));
         document.getElementById('cat-fact-btn').addEventListener('click', () => loadCatFact(true));
 
         // ═══════════════════════════════════════════════════════════
@@ -783,9 +1014,11 @@
             const pc = params.get('postcode');
             const prefs = loadPrefs();
 
-            // View: stored pref → device detection fallback
+            // View: stored pref → device detection fallback. Validate the stored value —
+            // the set has three members now, and a stale/garbage entry must not stick.
             const defaultView = window.matchMedia('(max-width: 1024px)').matches ? 'card' : 'table';
-            setView(prefs.view || defaultView);
+            const storedView = ['table', 'card', 'map'].includes(prefs.view) ? prefs.view : null;
+            setView(storedView || defaultView);
 
             // Sort: stored pref → default 'travel:1'
             const sortVal = prefs.sort || 'travel:1';
