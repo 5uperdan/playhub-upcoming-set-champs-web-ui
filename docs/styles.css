@@ -1114,6 +1114,13 @@ tr.cut-divider td {
     font-size: 0.875rem;
 }
 
+/* Holds "Try again or try another event" on one line — .error-screen is a
+   column flex container, so bare text between the links would wrap alone. */
+.error-actions {
+    font-size: 0.875rem;
+    color: #64748b;
+}
+
 /* ── Standings nav arrow buttons ── */
 .nav-arrow-btn {
     background: #fff;

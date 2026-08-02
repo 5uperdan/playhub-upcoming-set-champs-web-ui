@@ -39,7 +39,9 @@
     <!-- Error -->
     <div id="error-screen" class="error-screen" style="display:none">
         <p id="error-msg">Something went wrong.</p>
-        <a href="#" id="error-try-another">Try another event</a>
+        <div class="error-actions">
+            <a href="#" id="error-retry">Try again</a> or <a href="#" id="error-try-another">try another event</a>
+        </div>
     </div>
 
     <!-- App -->
@@ -2159,6 +2161,20 @@
                 eventId = null;
                 showEntryScreen();
                 document.getElementById('entry-url-input').focus();
+            });
+
+            // Wire "Try again" link on error screen — reloads the same event.
+            // Loads fail on transient network/proxy blips, so a retry is usually
+            // all that's needed. initialLoad() refetches and overwrites every
+            // piece of per-event state, so a partially-loaded event self-heals.
+            document.getElementById('error-retry').addEventListener('click', e => {
+                e.preventDefault();
+                if (!eventId) return;
+                if (pollTimer) clearTimeout(pollTimer);
+                if (countdownInterval) clearInterval(countdownInterval);
+                pollTimer = null;
+                isRefreshing = false;
+                startEventLoad();
             });
 
             // Wire "Try another event" link on error screen
