@@ -233,6 +233,11 @@
         let markerLayer = null;         // L.LayerGroup — cleared and refilled on every render
         let currentOrigin = '';         // normalised origin postcode, for the home marker
         let selectedDay = null;         // ISO date, or null for all days (map view only)
+        // The map auto-fits only once per dataset. After that the user's pan/zoom is
+        // theirs to keep — changing day or filters must not yank the view around. The
+        // "Fit" control re-arms it on demand.
+        let mapNeedsFit = true;
+        let lastFitBounds = null;       // bounds of the currently plotted markers, for the Fit control
 
         // ═══════════════════════════════════════════════════════════
         //  Preferences (localStorage)
@@ -255,6 +260,7 @@
             const filename = csvFilename(norm);
             currentOrigin = norm;
             selectedDay = null;   // day choice belongs to the previous event set
+            mapNeedsFit = true;   // different origin and events — re-fit is wanted here
 
             showLoading();
             try {
@@ -313,6 +319,73 @@
             return venueCoordsPromise;
         }
 
+        function mapFullscreenElement() {
+            return document.fullscreenElement || document.webkitFullscreenElement || null;
+        }
+
+        // Fullscreen can be refused even when document.fullscreenEnabled is true — an
+        // embedding page's permissions policy can block it. Swallow the rejection so it
+        // doesn't surface as an unhandled promise error, and leave the map usable.
+        function toggleMapFullscreen() {
+            const el = document.getElementById('map');
+            try {
+                const result = mapFullscreenElement()
+                    ? (document.exitFullscreen || document.webkitExitFullscreen).call(document)
+                    : (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+                if (result && typeof result.catch === 'function') {
+                    result.catch(err => console.warn('Full screen unavailable:', err));
+                }
+            } catch (err) {
+                console.warn('Full screen unavailable:', err);
+            }
+        }
+
+        // animate:false on programmatic fits — an animated fitBounds depends on the
+        // zoom transition completing, which can silently no-op (leaving the map on the
+        // old view). Instant framing is also what you want from a "Fit" button. The
+        // user's own pan/zoom gestures are unaffected.
+        function fitMapToMarkers() {
+            if (!leafletMap || !lastFitBounds || !lastFitBounds.length) return;
+            leafletMap.fitBounds(L.latLngBounds(lastFitBounds).pad(0.12), { maxZoom: 12, animate: false });
+        }
+
+        // Fit + full screen live INSIDE the map as Leaflet controls so they remain
+        // usable when the map is fullscreened (anything outside #map is hidden then).
+        function addMapControls(map) {
+            const supportsFullscreen = !!(document.fullscreenEnabled || document.webkitFullscreenEnabled);
+            const Extra = L.Control.extend({
+                options: { position: 'topleft' },
+                onAdd: function () {
+                    const bar = L.DomUtil.create('div', 'leaflet-bar map-extra-controls');
+                    const button = (label, title, onClick) => {
+                        const a = L.DomUtil.create('a', '', bar);
+                        a.href = '#';
+                        a.innerHTML = label;
+                        a.title = title;
+                        a.setAttribute('role', 'button');
+                        L.DomEvent.on(a, 'click', L.DomEvent.stop);
+                        L.DomEvent.on(a, 'click', onClick);
+                        return a;
+                    };
+                    button('Fit', 'Zoom to fit the events currently shown', fitMapToMarkers);
+                    if (supportsFullscreen) {
+                        const fsBtn = button('⛶', 'Full screen', toggleMapFullscreen);
+                        const sync = () => {
+                            const on = !!mapFullscreenElement();
+                            fsBtn.title = on ? 'Exit full screen' : 'Full screen';
+                            fsBtn.classList.toggle('active', on);
+                            // The container just changed size — Leaflet caches dimensions.
+                            setTimeout(() => map.invalidateSize(), 100);
+                        };
+                        document.addEventListener('fullscreenchange', sync);
+                        document.addEventListener('webkitfullscreenchange', sync);
+                    }
+                    return bar;
+                }
+            });
+            map.addControl(new Extra());
+        }
+
         function ensureMap() {
             if (leafletMap) return leafletMap;
             if (typeof L === 'undefined') return null;
@@ -322,6 +395,7 @@
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             }).addTo(leafletMap);
             markerLayer = L.layerGroup().addTo(leafletMap);
+            addMapControls(leafletMap);
             return leafletMap;
         }
 
@@ -426,9 +500,18 @@
                 bounds.push(home);
             }
 
-            // fitBounds throws on an empty list
-            if (bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.12), { maxZoom: 12 });
-            else map.setView(UK_CENTRE, 5);
+            // Only fit on the first render of a dataset (or when the Fit control asks).
+            // Re-fitting on every render would move the map out from under the user
+            // each time they changed day or typed in the filter box.
+            // fitBounds throws on an empty list.
+            lastFitBounds = bounds.length ? bounds.slice() : null;
+            // Guard on a real container size: a fit computed while the map is collapsed
+            // resolves to zoom 0, and consuming the flag then would strand it there for
+            // good. Leaving the flag armed means the next render fixes it.
+            if (mapNeedsFit && bounds.length && map.getSize().y > 0) {
+                map.fitBounds(L.latLngBounds(bounds).pad(0.12), { maxZoom: 12, animate: false });
+                mapNeedsFit = false;
+            }
 
             noteEl.textContent = rows.length
                 ? `Showing ${placedEvents} event${placedEvents !== 1 ? 's' : ''} at ` +

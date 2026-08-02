@@ -564,6 +564,36 @@ td.numeric {
     background: #f8fafc;
 }
 
+/* Fit / full-screen buttons. Leaflet's .leaflet-bar a is sized for single glyphs,
+   so the "Fit" text label needs a smaller font to sit on one line. */
+.map-extra-controls a {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #334155;
+    text-decoration: none;
+}
+
+.map-extra-controls a.active {
+    background: #e2e8f0;
+}
+
+/* An explicit height would survive into full screen and leave the map its usual
+   620px on a full-screen backdrop. :fullscreen and :-webkit-full-screen must be
+   separate rules — an unrecognised selector invalidates a whole selector list. */
+#map:fullscreen {
+    height: 100%;
+    width: 100%;
+    border-radius: 0;
+    border: none;
+}
+
+#map:-webkit-full-screen {
+    height: 100%;
+    width: 100%;
+    border-radius: 0;
+    border: none;
+}
+
 .map-note {
     margin-top: 0.5rem;
     font-size: 0.85rem;
