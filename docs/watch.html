@@ -266,7 +266,12 @@
             let idx = 0;
             for (const phase of (event.tournament_phases ?? [])) {
                 const isSwiss = phase.round_type === 'SWISS';
-                const phaseRounds = [...(phase.rounds ?? [])].sort((a, b) => a.round_number - b.round_number);
+                // Sealed events prepend a DECKBUILDING round (round_number 0) to the
+                // SWISS phase — it's a seating, not a played round, and its "matches"
+                // can carry bogus winner records. Exclude it everywhere.
+                const phaseRounds = [...(phase.rounds ?? [])]
+                    .filter(r => r.round_type !== 'DECKBUILDING')
+                    .sort((a, b) => a.round_number - b.round_number);
 
                 if (isSwiss) {
                     for (const rnd of phaseRounds) {
@@ -346,6 +351,12 @@
                 for (const m of (matchesByRound[rnd.id] ?? [])) all.push(m);
             }
             return all;
+        }
+
+        // Rounds with at least one finished match — the list the standings
+        // round navigator indexes into (standingsRoundIdx).
+        function roundsWithFinishedMatches() {
+            return rounds.filter(r => (matchesByRound[r.id] ?? []).some(m => m.isFinished));
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -597,10 +608,7 @@
             const cut = topCutSize(registrationCount);
 
             // ── Round navigator ──────────────────────────────────────
-            // Build the list of rounds that have at least one finished match
-            const roundsWithMatches = rounds.filter(r =>
-                (matchesByRound[r.id] ?? []).some(m => m.isFinished)
-            );
+            const roundsWithMatches = roundsWithFinishedMatches();
             const navEl = document.getElementById('standings-nav');
             const totalSwissRounds = rounds.filter(r => r.isSwiss).length;
 
@@ -613,7 +621,7 @@
                 const isHistorical = standingsRoundIdx !== null;
                 const label = isHistorical
                     ? `After ${roundsWithMatches[standingsRoundIdx].name}`
-                    : 'Current';
+                    : 'Live';
                 document.getElementById('standings-nav-label').textContent = label;
                 document.getElementById('standings-prev-btn').disabled = standingsRoundIdx === 0;
                 document.getElementById('standings-next-btn').disabled = !isHistorical;
@@ -707,6 +715,23 @@
                 }
             }
 
+            // ── Elimination status for row shading ───────────────────
+            // A player is knocked out only when they have lost a knockout
+            // match, or when ALL scheduled Swiss rounds are finished and they
+            // are outside the top cut. Mid-Swiss (even between rounds) nobody
+            // is out yet, so nothing is shaded red.
+            const koStarted = rounds.some(r => !r.isSwiss && (matchesByRound[r.id] ?? []).length > 0);
+            const finalSwissRnd = swissRndList.length > 0 ? swissRndList[swissRndList.length - 1] : null;
+            const finalSwissMatches = finalSwissRnd ? (matchesByRound[finalSwissRnd.id] ?? []) : [];
+            const swissOver = finalSwissMatches.length > 0 &&
+                finalSwissMatches.filter(m => !m.isBye).every(m => m.isFinished);
+            const koLosers = new Set();
+            for (const m of allMatches) {
+                if (m.isSwiss || !m.isFinished || m.isDraw || m.winnerId == null) continue;
+                const loser = m.winnerId === m.playerAId ? m.playerBId : m.playerAId;
+                if (loser != null) koLosers.add(loser);
+            }
+
             // Build table HTML
             const colHdrs = [
                 `<th style="width:2.5rem;text-align:right">#</th>`,
@@ -743,24 +768,16 @@
                     : '';
                 const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${droppedBadge}${idBtn}</span></td>`;
 
-                // Determine row background — simplified for historical view
+                // Determine row background — live view of a running event only.
+                // Red = knocked out; green = finished playing in the round
+                // currently in progress.
                 let rowBg = '';
-                if (!isHistoricalView) {
-                    const lastSwissRnd = latestSwissRoundInfo();
-                    const lastSwissComplete = lastSwissRnd != null &&
-                        (matchesByRound[lastSwissRnd.id] ?? []).filter(m => !m.isBye).every(m => m.isFinished);
-                    const koRounds = rounds.filter(r => !r.isSwiss);
-                    const koStarted = koRounds.some(r => (matchesByRound[r.id] ?? []).length > 0);
-                    const showElimShading = !isEventComplete && cut > 0 && (koStarted || lastSwissComplete);
-                    const isKoEliminated = showElimShading && koStarted && getAllMatches().some(
-                        m => !m.isSwiss && m.isFinished && !m.isDraw &&
-                            m.winnerId != null && m.winnerId !== s.playerId &&
-                            (m.playerAId === s.playerId || m.playerBId === s.playerId)
-                    );
-                    const missedCut = showElimShading && idx >= cut;
-                    const isDone = !isEventComplete && !showElimShading && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
+                if (!isHistoricalView && !isEventComplete) {
+                    const isKnockedOut = koLosers.has(s.playerId) ||
+                        (cut > 0 && (koStarted || swissOver) && idx >= cut);
+                    const isDone = hasUnfinished && doneIds.has(s.playerId) && !playingIds.has(s.playerId);
                     rowBg = isDropped ? 'background:#f8fafc;opacity:0.65'
-                        : (isKoEliminated || missedCut) ? 'background:#fff1f2'
+                        : isKnockedOut ? 'background:#fff1f2'
                         : isDone ? 'background:#f0fdf4'
                         : '';
                 }
@@ -824,10 +841,16 @@
             const container = document.getElementById('rounds-container');
             const titleEl = document.getElementById('rounds-section-title');
 
-            // Find the most recent round with any matches (Swiss or elim)
+            // Historical standings view: show the matches of the selected
+            // round. Live view: show the most recent round with any matches
+            // (Swiss or elim).
             let displayRound = null;
-            for (const rnd of rounds) {
-                if ((matchesByRound[rnd.id] ?? []).length > 0) displayRound = rnd;
+            if (standingsRoundIdx !== null) {
+                displayRound = roundsWithFinishedMatches()[standingsRoundIdx] ?? null;
+            } else {
+                for (const rnd of rounds) {
+                    if ((matchesByRound[rnd.id] ?? []).length > 0) displayRound = rnd;
+                }
             }
 
             if (!displayRound) {
@@ -1277,8 +1300,8 @@
                 return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:0.6rem 0.9rem;margin-bottom:0.6rem">
                     <div style="font-weight:600;font-size:0.85rem;margin-bottom:0.4rem">${level.points} point${level.points !== 1 ? 's' : ''}</div>
                     <div style="display:flex;gap:1.25rem">
-                        ${stackCol('Low ID stack', entries.slice(0, half))}
-                        ${stackCol('High ID stack', entries.slice(half))}
+                        ${stackCol('Low ID stack · lowest ID first', entries.slice(0, half))}
+                        ${stackCol('High ID stack · lowest ID first', entries.slice(half))}
                     </div>
                 </div>`;
             }).join('');
@@ -1287,8 +1310,10 @@
                 Pairings are drawn within each points group: players in one stack are most
                 likely to be paired against the other stack, unless paired up or down when
                 a group has an odd number of players. The exact opponent is random — PlayHub
-                does not pair by standings order. The low/high split is by PlayHub user ID
-                and is indicative: the boundary shifts as results come in.
+                does not pair by standings order. Each group is sorted by ascending PlayHub
+                user ID and split at the midpoint: the low stack is the first half, the high
+                stack the second, and both columns read top-to-bottom from lowest to highest
+                ID. The split is indicative — the boundary shifts as results come in.
             </p>`;
             return intro + levelBlocks;
         }
@@ -2048,23 +2073,25 @@
 
             // Wire standings nav arrows
             document.getElementById('standings-prev-btn').addEventListener('click', () => {
-                const rwm = rounds.filter(r => (matchesByRound[r.id] ?? []).some(m => m.isFinished));
+                const rwm = roundsWithFinishedMatches();
                 if (standingsRoundIdx === null) {
                     standingsRoundIdx = rwm.length - 1;
                 } else {
                     standingsRoundIdx = Math.max(0, standingsRoundIdx - 1);
                 }
                 renderStandings();
+                renderLatestRoundMatches();
             });
             document.getElementById('standings-next-btn').addEventListener('click', () => {
                 if (standingsRoundIdx === null) return;
-                const rwm = rounds.filter(r => (matchesByRound[r.id] ?? []).some(m => m.isFinished));
+                const rwm = roundsWithFinishedMatches();
                 if (standingsRoundIdx >= rwm.length - 1) {
                     standingsRoundIdx = null;
                 } else {
                     standingsRoundIdx++;
                 }
                 renderStandings();
+                renderLatestRoundMatches();
             });
 
             // Wire projection toggle and draw-type checkboxes
