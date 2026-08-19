@@ -417,7 +417,9 @@
         function venuePopupHtml(g) {
             // Every event in a group shares a venue, so travel time is identical and
             // sortRows() would be a no-op — order by date instead.
-            const events = [...g.rows].sort((a, b) => (a['Date'] || '').localeCompare(b['Date'] || ''));
+            const events = [...g.rows].sort((a, b) =>
+                (a['Date'] || '').localeCompare(b['Date'] || '') ||
+                (a['Start time'] || '').localeCompare(b['Start time'] || ''));
             const travel = events[0]['Travel time'] || '';
             const items = events.map(r => {
                 const eid = extractEventId(r['Event link']);
@@ -426,7 +428,7 @@
                 if (eid) links.push(`<a href="watch.html?id=${eid}">Watch</a>`);
                 if (r['Route link']) links.push(`<a href="${esc(r['Route link'])}" target="_blank" rel="noopener">Directions</a>`);
                 return `<li class="map-pop-event">
-                    <span class="map-pop-date">${esc(formatDate(r['Date']))}</span>
+                    <span class="map-pop-date">${esc(formatDate(r['Date']))}${(t => t ? ' · ' + esc(t) : '')(formatStartTime(r['Start time']))}</span>
                     ${r['Type'] ? typeBadge(r['Type']) : ''}
                     ${links.length ? `<span class="map-pop-links">${links.join(' · ')}</span>` : ''}
                 </li>`;
@@ -549,6 +551,19 @@
             return (str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
+        // Every tracked event is at a GB/UK store (scrape.py filters on _UK_COUNTRY_CODES),
+        // so the venue zone is always Europe/London. The CSV holds a UTC instant —
+        // printing its HH:MM directly would be an hour out for the whole of BST.
+        const EVENT_TZ = 'Europe/London';
+        function formatStartTime(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            if (isNaN(d)) return '';
+            return new Intl.DateTimeFormat('en-GB', {
+                timeZone: EVENT_TZ, hour: '2-digit', minute: '2-digit', hour12: false
+            }).format(d);
+        }
+
         function formatDate(iso) {
             if (!iso) return 'Unknown date';
             const d = new Date(iso + 'T00:00:00');
@@ -581,7 +596,9 @@
             if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
             if (eventId) links.push(`<a class="link-icon" href="watch.html?id=${eventId}" title="Watch live">👁️</a>`);
 
+            const startTime = formatStartTime(r['Start time']);
             return `<tr>
+                <td style="white-space:nowrap">${startTime ? esc(startTime) : '<span class="badge-na">—</span>'}</td>
                 <td style="font-weight:500">${esc(r['Venue']) || '—'}</td>
                 <td>${typeBadge(r['Type'])}</td>
                 <td class="muted" style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r['Location'])}">${esc(postcode) || esc(r['Location']) || '—'}</td>
@@ -613,10 +630,12 @@
 
             const naVal = v => (v && v !== 'N/A') ? esc(v) : '<span class="badge-na">—</span>';
 
+            const startTime = formatStartTime(r['Start time']);
             return `<div class="card">
                 <div class="card-header">
                     <span class="card-venue">${esc(r['Venue']) || '—'}</span>
                 </div>
+                <div class="card-row"><span class="card-label">Start</span><span>${startTime ? esc(startTime) : '<span class="badge-na">—</span>'}</span></div>
                 ${r['Type'] ? `<div class="card-row"><span class="card-label">Type</span>${typeBadge(r['Type'])}</div>` : ''}
                 ${location ? `<div class="card-row"><span class="card-label">Location</span><span class="muted" style="font-size:0.82rem">${esc(location)}</span></div>` : ''}
                 <div class="card-row"><span class="card-label">Drive Time</span><span>${esc(travel)}</span></div>
@@ -627,29 +646,28 @@
             </div>`;
         }
 
+        // width '' means auto — Venue takes the slack. COLS drives both this
+        // table and the "New competitions" one, so a column added here appears in
+        // both with no hand-shifted indices anywhere.
         const COLS = [
-            { key: 'venue', label: 'Venue' },
-            { key: 'type', label: 'Type', nosort: true },
-            { key: 'location', label: 'Location' },
-            { key: 'signed_up', label: 'Signed up', numeric: true },
-            { key: 'last_champ', label: 'Last Attendance', numeric: true },
-            { key: 'price', label: 'Price', nosort: true },
-            { key: 'travel', label: 'Drive Time' },
-            { key: 'links', label: 'Links', nosort: true },
+            { key: 'time', label: 'Time', width: '62px' },
+            { key: 'venue', label: 'Venue', width: '' },
+            { key: 'type', label: 'Type', nosort: true, width: '170px' },
+            { key: 'location', label: 'Location', width: '90px' },
+            { key: 'signed_up', label: 'Signed up', numeric: true, width: '80px' },
+            { key: 'last_champ', label: 'Last Attendance', numeric: true, width: '130px' },
+            { key: 'price', label: 'Price', nosort: true, width: '65px' },
+            { key: 'travel', label: 'Drive Time', width: '90px' },
+            { key: 'links', label: 'Links', nosort: true, width: '95px' },
         ];
 
+        function colsColgroup(leading = '') {
+            const cols = (leading ? [{ width: leading }] : []).concat(COLS);
+            return `<colgroup>${cols.map(c => `<col${c.width ? ` style="width:${c.width}"` : ''}>`).join('')}</colgroup>`;
+        }
 
         function buildTableHeader() {
-            const colgroup = `<colgroup>
-                <col><!-- Venue: auto -->
-                <col style="width:170px"><!-- Type -->
-                <col style="width:90px">
-                <col style="width:80px">
-                <col style="width:130px">
-                <col style="width:65px">
-                <col style="width:90px">
-                <col style="width:95px">
-            </colgroup>`;
+            const colgroup = colsColgroup();
             const ths = COLS.map(c => {
                 const alignStyle = c.numeric ? ' style="text-align:right"' : '';
                 const cls = !c.nosort && sortCol === c.key
@@ -664,7 +682,11 @@
             if (!sortCol) return rows;
             return [...rows].sort((a, b) => {
                 let av, bv;
-                if (sortCol === 'travel') {
+                if (sortCol === 'time') {
+                    // Missing start times sort last in both directions.
+                    av = Date.parse(a['Start time']) || Infinity;
+                    bv = Date.parse(b['Start time']) || Infinity;
+                } else if (sortCol === 'travel') {
                     av = travelToSeconds(a['Travel time']);
                     bv = travelToSeconds(b['Travel time']);
                 } else if (sortCol === 'signed_up') {
@@ -817,6 +839,7 @@
                             <span class="card-venue">${esc(r['Venue']) || '—'}</span>
                         </div>
                         <div class="card-row"><span class="card-label">Date</span><span style="font-size:0.82rem">${esc(formatDate(r['Date']))}</span></div>
+                        <div class="card-row"><span class="card-label">Start</span><span>${(t => t ? esc(t) : '<span class="badge-na">—</span>')(formatStartTime(r['Start time']))}</span></div>
                         ${r['Type'] ? `<div class="card-row"><span class="card-label">Type</span>${typeBadge(r['Type'])}</div>` : ''}
                         ${location ? `<div class="card-row"><span class="card-label">Location</span><span class="muted" style="font-size:0.82rem">${esc(location)}</span></div>` : ''}
                         <div class="card-row"><span class="card-label">Drive Time</span><span>${esc(travel)}</span></div>
@@ -828,10 +851,13 @@
                 }).join('');
                 container.innerHTML = `<div class="cards-grid">${cards}</div>`;
             } else {
-                const dateColgroup = `<colgroup><col style="width:80px"><col><col style="width:170px"><col style="width:90px"><col style="width:80px"><col style="width:130px"><col style="width:65px"><col style="width:90px"><col style="width:95px"></colgroup>`;
-                const dateThs = ['Date', ...COLS.map(c => c.label)].map((lbl, i) => {
-                    const align = (i === 4 || i === 5) ? ' style="text-align:right;cursor:default;color:#94a3b8"' : ' style="cursor:default;color:#94a3b8"';
-                    return `<th${align}>${esc(lbl)}</th>`;
+                // This table is COLS with a leading Date column, so widths and
+                // alignment are derived from COLS — adding a column there must not
+                // require hand-shifting magic indices here.
+                const dateColgroup = colsColgroup('80px');
+                const dateThs = [{ label: 'Date' }, ...COLS].map(c => {
+                    const align = c.numeric ? ' style="text-align:right;cursor:default;color:#94a3b8"' : ' style="cursor:default;color:#94a3b8"';
+                    return `<th${align}>${esc(c.label)}</th>`;
                 }).join('');
                 const dateRows = recent.map(r => {
                     const travel = r['Travel time'] || 'N/A';
@@ -848,8 +874,10 @@
                     if (eventLink) links.push(`<a class="link-icon" href="${esc(eventLink)}" target="_blank" rel="noopener" title="Event page">🔗</a>`);
                     if (lastChampLink) links.push(`<a class="link-icon" href="${esc(lastChampLink)}" target="_blank" rel="noopener" title="Last set champ">📋</a>`);
                     if (_eid2) links.push(`<a class="link-icon" href="watch.html?id=${_eid2}" title="Watch live">👁️</a>`);
+                    const startTime = formatStartTime(r['Start time']);
                     return `<tr>
                         <td class="muted" style="font-size:0.82rem;white-space:nowrap">${esc(r['Date'])}</td>
+                        <td style="white-space:nowrap">${startTime ? esc(startTime) : '<span class="badge-na">—</span>'}</td>
                         <td style="font-weight:500">${esc(r['Venue']) || '—'}</td>
                         <td>${typeBadge(r['Type'])}</td>
                         <td class="muted" style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r['Location'])}">${esc(postcode) || esc(r['Location']) || '—'}</td>
@@ -860,7 +888,7 @@
                         <td style="white-space:nowrap">${links.join(' ')}</td>
                     </tr>`;
                 }).join('');
-                container.innerHTML = `<div class="table-wrap"><table style="min-width:940px">${dateColgroup}<thead><tr>${dateThs}</tr></thead><tbody>${dateRows}</tbody></table></div>`;
+                container.innerHTML = `<div class="table-wrap"><table style="min-width:1022px">${dateColgroup}<thead><tr>${dateThs}</tr></thead><tbody>${dateRows}</tbody></table></div>`;
             }
             section.style.display = 'block';
         }
@@ -927,7 +955,7 @@
                     html.push(`<div id="day-${idx}" class="day-group">
                         <h3 class="day-heading">${esc(formatDate(date))}</h3>
                         <div class="table-wrap">
-                            <table style="min-width:880px">${buildTableHeader()}<tbody>
+                            <table style="min-width:942px">${buildTableHeader()}<tbody>
                                 ${sorted.map(renderRow).join('')}
                             </tbody></table>
                         </div>
