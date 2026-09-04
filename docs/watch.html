@@ -202,6 +202,30 @@
                 .join('|');
         }
 
+        // A round's finished results, keyed by the pair who played. Used to tell a
+        // genuine TO correction (an existing result changed or withdrawn) apart from a
+        // result simply being reported late — the latter is normal and must NOT pause
+        // refreshing, or those points never reach the standings.
+        function finishedResultsByPair(matches) {
+            const map = new Map();
+            for (const m of matches) {
+                if (!m.isFinished) continue;
+                const key = [m.playerAId, m.playerBId].sort().join(':');
+                map.set(key, `${m.winnerId}:${m.playerAScore}:${m.playerBScore}`);
+            }
+            return map;
+        }
+
+        function isResultCorrection(prevMatches, newMatches) {
+            const before = finishedResultsByPair(prevMatches);
+            const after = finishedResultsByPair(newMatches);
+            for (const [key, result] of before) {
+                // Changed result, or a previously-reported match now unreported.
+                if (!after.has(key) || after.get(key) !== result) return true;
+            }
+            return false;   // additions only
+        }
+
         function storeFingerprints() {
             for (const rnd of rounds) {
                 const ms = matchesByRound[rnd.id];
@@ -766,7 +790,10 @@
                 // Player name + dropped badge + ID button
                 const isDropped = droppedIds.has(s.playerId);
                 const droppedBadge = isDropped ? ` <span class="dropped-badge">dropped</span>` : '';
-                const canCheckID = isFinalSwissPaired && !isDropped && (playerUnfinishedCountMap.get(s.playerId) ?? 0) <= 1;
+                // Exactly one unfinished match: a player with none has nothing left to draw
+                // (this showed the button to the whole field once the final round completed),
+                // and with more than one the check isn't deterministic.
+                const canCheckID = isFinalSwissPaired && !isDropped && (playerUnfinishedCountMap.get(s.playerId) ?? 0) === 1;
                 const idBtn = canCheckID
                     ? ` <button class="id-btn${activeIDPlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Check if safe to intentionally draw">🤝</button>`
                     : '';
@@ -1950,6 +1977,15 @@
                 if (nextIdx < rounds.length) roundsToRefresh.push(rounds[nextIdx]);
             }
 
+            // Any round still holding an unreported result is live data, even if it is
+            // no longer the "active" round. A straggler Swiss match often gets reported
+            // after the KO bracket is posted; without this the final Swiss round is
+            // never re-fetched and its points never reach the standings.
+            for (const rnd of rounds) {
+                const ms = matchesByRound[rnd.id] ?? [];
+                if (ms.length > 0 && ms.some(m => !m.isFinished && !m.isBye)) roundsToRefresh.push(rnd);
+            }
+
             // After 5 refreshes since last integrity check, re-fetch the previous completed
             // round and compare fingerprints to detect any TO result corrections.
             if (pollCount >= 5 && activeRnd) {
@@ -1960,8 +1996,13 @@
                     if (!roundsToRefresh.find(r => r.id === prevRnd.id)) {
                         const raw = await apiFetchRoundMatches(prevRnd.id);
                         if (raw.length > 0) {
-                            const newFp = fingerprintRound(raw.map(m => parseMatchRecord(m, prevRnd)));
-                            if (newFp !== (roundFingerprints[prevRnd.id] ?? '')) {
+                            const refreshed = raw.map(m => parseMatchRecord(m, prevRnd));
+                            if (!isResultCorrection(matchesByRound[prevRnd.id] ?? [], refreshed)) {
+                                // Only additions — a late-reported match. Merge it so the
+                                // standings pick the points up, and keep polling.
+                                matchesByRound[prevRnd.id] = refreshed;
+                                roundFingerprints[prevRnd.id] = fingerprintRound(refreshed);
+                            } else {
                                 // Result correction detected — stop polling and warn the user
                                 console.warn(`Result correction detected in ${prevRnd.name}, pausing auto-refresh`);
                                 if (pollTimer) clearTimeout(pollTimer);
