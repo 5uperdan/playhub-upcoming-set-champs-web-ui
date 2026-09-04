@@ -137,14 +137,13 @@
                 Auto-refresh has been paused — the standings shown may be out of date.
             </p>
             <p style="margin:0 0 1.5rem;font-size:0.9rem;line-height:1.5;color:#44403c">
-                Please <strong>reload the page</strong> in your browser to fetch the corrected data.
+                Reloading is the only way to pick the corrected results up — closing this
+                message does the same thing.
             </p>
             <div style="display:flex;gap:0.75rem;justify-content:center">
-                <button onclick="location.reload()"
+                <button id="correction-reload-btn"
                     style="background:#2563eb;color:#fff;border:none;border-radius:6px;padding:0.55rem 1.25rem;font-size:0.9rem;font-weight:600;cursor:pointer">Reload
                     now</button>
-                <button onclick="document.getElementById('data-correction-dialog').close()"
-                    style="background:#f1f5f9;color:#334155;border:1px solid #cbd5e1;border-radius:6px;padding:0.55rem 1.25rem;font-size:0.9rem;cursor:pointer">Dismiss</button>
             </div>
         </div>
     </dialog>
@@ -2217,6 +2216,20 @@
             const input = document.getElementById('entry-url-input');
             input.addEventListener('focus', () => input.style.borderColor = '#2563eb');
             input.addEventListener('blur', () => input.style.borderColor = '#cbd5e1');
+
+            // Correction modal: reloading is the ONLY action. Auto-refresh has already
+            // been stopped by the time this opens, so any other way out (Escape, or a
+            // stray close()) would silently strand the viewer on stale standings. Route
+            // every exit through the same close -> reload path.
+            const correctionDialog = document.getElementById('data-correction-dialog');
+            const reloadAfterCorrection = () => location.reload();
+            // The button reloads DIRECTLY rather than via close(), so the primary action
+            // never depends on the dialog's events firing. 'cancel' (Escape) and 'close'
+            // are then belt-and-braces for every other way out. Reload being called twice
+            // is harmless — the first navigation wins.
+            document.getElementById('correction-reload-btn').addEventListener('click', reloadAfterCorrection);
+            correctionDialog.addEventListener('cancel', reloadAfterCorrection);
+            correctionDialog.addEventListener('close', reloadAfterCorrection);
 
             // Wire "Change event" button
             document.getElementById('change-event-btn').addEventListener('click', () => {
