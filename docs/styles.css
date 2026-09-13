@@ -744,6 +744,70 @@ td.numeric {
     background: #e0f2fe;
 }
 
+/* ── Completed events ── */
+.show-past {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.85rem;
+    color: #475569;
+    white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+}
+
+.show-past input {
+    cursor: pointer;
+}
+
+.day-heading.day-past {
+    color: #94a3b8;
+}
+
+.day-done {
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    background: #f1f5f9;
+    color: #64748b;
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    vertical-align: middle;
+}
+
+.winner-cell,
+.winner-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-weight: 600;
+    color: #92400e;
+}
+
+.map-pop-winner {
+    display: block;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: #92400e;
+}
+
+/* The page is capped at 1100px for readability, but the day tables need more than
+   that once the Winner column appears (1092px of columns vs 1052px of usable width),
+   so they scrolled sideways even on a 1440px screen with 340px of margin going spare.
+   Let just the tables use the extra room; cards and the map keep the reading width.
+   The breakpoint is where the widening actually clears the widest table (1092px of
+   columns plus the page inset) — starting it any earlier just left it scrolling by
+   a handful of pixels. Below it the table scrolls in its wrapper, as it always has. */
+@media (min-width: 1160px) {
+    body.view-table #days-container,
+    body.view-table #recent-section {
+        width: min(1400px, calc(100vw - 3rem));
+        margin-left: calc((100% - min(1400px, calc(100vw - 3rem))) / 2);
+    }
+}
+
 /* ── Mobile ── */
 @media (max-width: 640px) {
     header {

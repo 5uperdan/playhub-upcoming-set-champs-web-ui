@@ -83,6 +83,9 @@
                     <button id="btn-card-view" class="toggle-btn">Cards</button>
                     <button id="btn-map-view" class="toggle-btn">Map</button>
                 </div>
+                <label id="show-past-label" class="show-past">
+                    <input type="checkbox" id="show-past"> Show completed
+                </label>
                 <span id="event-count" class="count-label"></span>
             </div>
 
@@ -223,6 +226,7 @@
         let sortCol = 'travel';
         let sortDir = 1;
         let viewMode = 'table'; // 'table', 'card' or 'map'
+        let showPast = false;   // completed events are in the CSV but hidden by default
         let recentCollapsed = false;
 
         // ── Map view state ──
@@ -429,6 +433,7 @@
                 if (r['Route link']) links.push(`<a href="${esc(r['Route link'])}" target="_blank" rel="noopener">Directions</a>`);
                 return `<li class="map-pop-event">
                     <span class="map-pop-date">${esc(formatDate(r['Date']))}${(t => t ? ' · ' + esc(t) : '')(formatStartTime(r['Start time']))}</span>
+                    ${r['Winner'] ? `<span class="map-pop-winner">🏆 ${esc(r['Winner'])}</span>` : ''}
                     ${r['Type'] ? typeBadge(r['Type']) : ''}
                     ${links.length ? `<span class="map-pop-links">${links.join(' · ')}</span>` : ''}
                 </li>`;
@@ -537,6 +542,9 @@
 
         function applyViewVisibility() {
             const isMap = viewMode === 'map';
+            // Only the table view breaks out of the page's reading width — the cards
+            // grid and the map share this container and should stay at 1100px.
+            document.body.classList.toggle('view-table', viewMode === 'table');
             document.getElementById('map-section').style.display = isMap ? '' : 'none';
             document.getElementById('days-container').style.display = isMap ? 'none' : '';
             // renderRecentEvents emits a table unless viewMode is 'card', which would
@@ -597,6 +605,9 @@
             if (eventId) links.push(`<a class="link-icon" href="watch.html?id=${eventId}" title="Watch live">👁️</a>`);
 
             const startTime = formatStartTime(r['Start time']);
+            const winnerCell = showPast
+                ? `<td class="winner-cell">${r['Winner'] ? '🏆 ' + esc(r['Winner']) : '<span class="badge-na">—</span>'}</td>`
+                : '';
             return `<tr>
                 <td style="white-space:nowrap">${startTime ? esc(startTime) : '<span class="badge-na">—</span>'}</td>
                 <td style="font-weight:500">${esc(r['Venue']) || '—'}</td>
@@ -604,6 +615,7 @@
                 <td class="muted" style="font-size:0.82rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r['Location'])}">${esc(postcode) || esc(r['Location']) || '—'}</td>
                 <td class="numeric">${signedUp !== '' && signedUp !== 'N/A' ? esc(signedUp) : '<span class="badge-na">—</span>'}</td>
                 <td class="numeric">${lastChamp !== '' && lastChamp !== 'N/A' ? esc(lastChamp) : '<span class="badge-na">—</span>'}</td>
+                ${winnerCell}
                 <td>${price ? esc(price) : '<span class="badge-na">—</span>'}</td>
                 <td>${esc(travel)}</td>
                 <td style="white-space:nowrap">${links.join(' ')}</td>
@@ -641,6 +653,7 @@
                 <div class="card-row"><span class="card-label">Drive Time</span><span>${esc(travel)}</span></div>
                 <div class="card-row"><span class="card-label">Signed up</span><span>${naVal(signedUp)}</span></div>
                 <div class="card-row"><span class="card-label">Last Attendance</span><span>${naVal(lastChamp)}</span></div>
+                ${r['Winner'] ? `<div class="card-row"><span class="card-label">Winner</span><span class="winner-name">🏆 ${esc(r['Winner'])}</span></div>` : ''}
                 ${price ? `<div class="card-row"><span class="card-label">Price</span><span>${esc(price)}</span></div>` : ''}
                 ${links.length ? `<div class="card-links">${links.join(' ')}</div>` : ''}
             </div>`;
@@ -656,19 +669,38 @@
             { key: 'location', label: 'Location', width: '90px' },
             { key: 'signed_up', label: 'Signed up', numeric: true, width: '80px' },
             { key: 'last_champ', label: 'Last Attendance', numeric: true, width: '130px' },
+            { key: 'winner', label: 'Winner', nosort: true, width: '150px' },
             { key: 'price', label: 'Price', nosort: true, width: '65px' },
             { key: 'travel', label: 'Drive Time', width: '90px' },
             { key: 'links', label: 'Links', nosort: true, width: '95px' },
         ];
 
-        function colsColgroup(leading = '') {
-            const cols = (leading ? [{ width: leading }] : []).concat(COLS);
+        // Winner is only meaningful for completed events, so the column appears with
+        // them. "New competitions" only ever lists upcoming events, so it passes false
+        // and never renders the column — its rows have no winner cell to match.
+        function colsFor(includeWinner) {
+            return includeWinner ? COLS : COLS.filter(c => c.key !== 'winner');
+        }
+        function activeCols() {
+            return colsFor(showPast);
+        }
+
+        // Sum of the fixed column widths plus room for the auto-sized Venue column.
+        // Derived rather than hardcoded: a hardcoded min-width squeezed the headers on
+        // top of each other when the Winner column appeared.
+        const VENUE_MIN_WIDTH = 160;
+        function colsMinWidth(leading = 0, cols = activeCols()) {
+            return cols.reduce((sum, c) => sum + (parseInt(c.width) || VENUE_MIN_WIDTH), leading);
+        }
+
+        function colsColgroup(leading = '', colList = activeCols()) {
+            const cols = (leading ? [{ width: leading }] : []).concat(colList);
             return `<colgroup>${cols.map(c => `<col${c.width ? ` style="width:${c.width}"` : ''}>`).join('')}</colgroup>`;
         }
 
         function buildTableHeader() {
             const colgroup = colsColgroup();
-            const ths = COLS.map(c => {
+            const ths = activeCols().map(c => {
                 const alignStyle = c.numeric ? ' style="text-align:right"' : '';
                 const cls = !c.nosort && sortCol === c.key
                     ? ` class="${sortDir === 1 ? 'sort-asc' : 'sort-desc'}"`
@@ -745,6 +777,23 @@
             const kept = (loadPrefs().hiddenTypes || []).filter(t => !allTypes.includes(t));
             const hidden = allTypes.filter(t => !activeTypes.has(t));
             savePrefs({ hiddenTypes: [...kept, ...hidden] });
+        }
+
+        // Today in the CSV's own date format, so the comparison is a plain string
+        // compare against the Date column.
+        function todayISO() {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+
+        function isPast(row) {
+            return (row['Date'] || '') < todayISO();
+        }
+
+        // Completed events are in the CSV so their winners can be shown, but the page
+        // is for planning ahead — they stay hidden until asked for.
+        function pastFiltered(rows) {
+            return showPast ? rows : rows.filter(r => !isPast(r));
         }
 
         function typeFiltered(rows) {
@@ -854,8 +903,8 @@
                 // This table is COLS with a leading Date column, so widths and
                 // alignment are derived from COLS — adding a column there must not
                 // require hand-shifting magic indices here.
-                const dateColgroup = colsColgroup('80px');
-                const dateThs = [{ label: 'Date' }, ...COLS].map(c => {
+                const dateColgroup = colsColgroup('80px', colsFor(false));
+                const dateThs = [{ label: 'Date' }, ...colsFor(false)].map(c => {
                     const align = c.numeric ? ' style="text-align:right;cursor:default;color:#94a3b8"' : ' style="cursor:default;color:#94a3b8"';
                     return `<th${align}>${esc(c.label)}</th>`;
                 }).join('');
@@ -888,15 +937,17 @@
                         <td style="white-space:nowrap">${links.join(' ')}</td>
                     </tr>`;
                 }).join('');
-                container.innerHTML = `<div class="table-wrap"><table style="min-width:1022px">${dateColgroup}<thead><tr>${dateThs}</tr></thead><tbody>${dateRows}</tbody></table></div>`;
+                container.innerHTML = `<div class="table-wrap"><table style="min-width:${colsMinWidth(80, colsFor(false))}px">${dateColgroup}<thead><tr>${dateThs}</tr></thead><tbody>${dateRows}</tbody></table></div>`;
             }
             section.style.display = 'block';
         }
 
         function renderTable() {
             applyViewVisibility();
-            if (viewMode !== 'map') renderRecentEvents(typeFiltered(allRows));
-            let rows = typeFiltered(allRows);
+            // "New competitions" is about events newly added to the schedule, so it
+            // always ignores completed ones regardless of the toggle.
+            if (viewMode !== 'map') renderRecentEvents(typeFiltered(allRows).filter(r => !isPast(r)));
+            let rows = pastFiltered(typeFiltered(allRows));
 
             // Filter
             if (filterText) {
@@ -946,16 +997,17 @@
             const html = [];
             for (const [idx, [date, dayRows]] of Array.from(groups.entries()).entries()) {
                 const sorted = sortRows(dayRows);
+                const dayIsPast = date < todayISO();
                 if (viewMode === 'card') {
                     html.push(`<div id="day-${idx}" class="day-group">
-                        <h3 class="day-heading">${esc(formatDate(date))}</h3>
+                        <h3 class="day-heading${dayIsPast ? ' day-past' : ''}">${esc(formatDate(date))}${dayIsPast ? ' <span class="day-done">completed</span>' : ''}</h3>
                         <div class="cards-grid">${sorted.map(renderCard).join('')}</div>
                     </div>`);
                 } else {
                     html.push(`<div id="day-${idx}" class="day-group">
-                        <h3 class="day-heading">${esc(formatDate(date))}</h3>
+                        <h3 class="day-heading${dayIsPast ? ' day-past' : ''}">${esc(formatDate(date))}${dayIsPast ? ' <span class="day-done">completed</span>' : ''}</h3>
                         <div class="table-wrap">
-                            <table style="min-width:942px">${buildTableHeader()}<tbody>
+                            <table style="min-width:${colsMinWidth()}px">${buildTableHeader()}<tbody>
                                 ${sorted.map(renderRow).join('')}
                             </tbody></table>
                         </div>
@@ -1036,6 +1088,13 @@
         }
 
         document.getElementById('btn-table-view').addEventListener('click', () => setView('table'));
+        document.getElementById('show-past').addEventListener('change', e => {
+            showPast = e.target.checked;
+            savePrefs({ showPast });
+            // The day list and the Winner column both change shape, so re-render whole.
+            renderTable();
+        });
+
         document.getElementById('btn-card-view').addEventListener('click', () => setView('card'));
         document.getElementById('btn-map-view').addEventListener('click', () => setView('map'));
         document.getElementById('cat-fact-btn').addEventListener('click', () => loadCatFact(true));
@@ -1130,6 +1189,11 @@
             const defaultView = window.matchMedia('(max-width: 1024px)').matches ? 'card' : 'table';
             const storedView = ['table', 'card', 'map'].includes(prefs.view) ? prefs.view : null;
             setView(storedView || defaultView);
+
+            // Completed events: stored pref, off by default. Set before the first render
+            // so the Winner column and the past days appear together on load.
+            showPast = prefs.showPast === true;
+            document.getElementById('show-past').checked = showPast;
 
             // Sort: stored pref → default 'travel:1'
             const sortVal = prefs.sort || 'travel:1';
