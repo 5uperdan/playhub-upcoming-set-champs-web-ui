@@ -148,6 +148,22 @@
         </div>
     </dialog>
 
+    <!-- Decklist modal — full screen on phones, a centred panel elsewhere -->
+    <dialog id="deck-dialog" class="deck-dialog" aria-labelledby="deck-dialog-title">
+        <div class="deck-dialog-head">
+            <div class="deck-dialog-titles">
+                <h2 id="deck-dialog-title"></h2>
+                <div id="deck-dialog-sub" class="deck-dialog-sub"></div>
+            </div>
+            <button type="button" class="deck-dialog-close" id="deck-dialog-close" aria-label="Close decklist">✕</button>
+        </div>
+        <div id="deck-dialog-body" class="deck-dialog-body"></div>
+        <div class="deck-dialog-foot">
+            <button type="button" class="mini-btn" id="deck-copy-btn" disabled>Copy list</button>
+            <span id="deck-copy-note" class="deck-copy-note" aria-live="polite"></span>
+        </div>
+    </dialog>
+
     <script>
         // ═══════════════════════════════════════════════════════════
         //  Constants
@@ -170,6 +186,21 @@
         let playerNames = {};          // ph_user_id → display name
         let allPlayerIds = [];         // all unique ph_user_ids seen in any match
         let registrationCount = 0;     // starting player count from event / registrations
+        // Deck inks per player, from match records' user_event_status.deck_descriptor_label.
+        // Only some events fill it in (e.g. DLC events with decklists); it is NOT the
+        // profile avatar, whose inks are a player's pick and rarely match their deck.
+        let playerInks = {};           // ph_user_id → [{key, name, hex, letter}]
+        // One signed symbol URL per ink, kept from the first record that carried it.
+        // Every API response signs the URL afresh, so taking each row's own URL would
+        // make the browser download the same six images once per row, every poll.
+        let inkSymbolUrls = {};        // ink key → image URL
+        // Deckbuilder deck UUID per player: registrations' deck_id, which the API only
+        // returns once the organiser has PUBLISHED decklists. Decks are fetched one at
+        // a time when someone opens them — never in bulk.
+        let playerDeckIds = {};        // ph_user_id → deck UUID
+        let decklistStatusAtRegFetch = null; // settings.decklist_status when registrations were fetched
+        let deckCache = new Map();     // deck UUID → Promise<deck JSON>
+        let deckDialogToken = 0;       // bumps on every open, so a slow load can't overwrite a newer one
 
         let isEventComplete = false;
         let activeIDPlayerId = null;
@@ -359,6 +390,14 @@
             // Update global player name map
             if (playerAId != null) playerNames[playerAId] = playerAName;
             if (playerBId != null) playerNames[playerBId] = playerBName;
+
+            // Deck inks, where the event provides them. A null label never clears inks
+            // already known — a later record missing the field shouldn't wipe them.
+            for (const rel of rels) {
+                const pid = rel.player?.id ?? null;
+                const inks = parseDescriptorInks(rel.user_event_status?.deck_descriptor_label);
+                if (pid != null && inks) playerInks[pid] = inks;
+            }
 
             return {
                 playerAId, playerBId, playerAName, playerBName,
@@ -628,6 +667,262 @@
         }
 
         // ═══════════════════════════════════════════════════════════
+        //  Ink colours
+        // ═══════════════════════════════════════════════════════════
+        // Values as the API sends them in each symbol (name, fallback_text,
+        // hex_code) — used when a symbol arrives without them, or for the per-card
+        // inks in a decklist, which carry only the key.
+        const INK_INFO = {
+            amber:    { name: 'Amber',    letter: 'A', hex: '#FFA500' },
+            amethyst: { name: 'Amethyst', letter: 'M', hex: '#9966CC' },
+            emerald:  { name: 'Emerald',  letter: 'E', hex: '#50C878' },
+            ruby:     { name: 'Ruby',     letter: 'R', hex: '#E0115F' },
+            sapphire: { name: 'Sapphire', letter: 'S', hex: '#0F52BA' },
+            steel:    { name: 'Steel',    letter: 'T', hex: '#71797E' },
+        };
+
+        function makeInk(rawKey, sym = null) {
+            const key = (rawKey ?? '').toString().trim().toLowerCase();
+            if (!key) return null;
+            const info = INK_INFO[key] ?? {};
+            if (sym?.image_url && !inkSymbolUrls[key]) inkSymbolUrls[key] = sym.image_url;
+            const hex = sym?.hex_code ?? info.hex;
+            return {
+                key,
+                name: sym?.name ?? info.name ?? key.charAt(0).toUpperCase() + key.slice(1),
+                letter: (sym?.fallback_text ?? info.letter ?? key.charAt(0)).toString().slice(0, 2).toUpperCase(),
+                // The hex goes into a style attribute — accept only a colour literal
+                hex: /^#[0-9a-f]{3,8}$/i.test(hex ?? '') ? hex : '#94a3b8',
+            };
+        }
+
+        // A descriptor label ({label, parts: [{value: "amber,steel", symbols: [...]}]}),
+        // as found on match records and on decks, → array of inks, or null.
+        function parseDescriptorInks(label) {
+            if (!label || !Array.isArray(label.parts)) return null;
+            const inks = [];
+            for (const part of label.parts) {
+                const syms = Array.isArray(part.symbols) ? part.symbols : [];
+                if (syms.length > 0) {
+                    for (const s of syms) inks.push(makeInk(s.symbol_key, s));
+                } else if (typeof part.value === 'string') {
+                    for (const k of part.value.split(',')) inks.push(makeInk(k));
+                }
+            }
+            const seen = new Set();
+            const out = inks.filter(i => i && !seen.has(i.key) && seen.add(i.key));
+            return out.length > 0 ? out : null;
+        }
+
+        // The PlayHub symbol image when we have one; otherwise (or if it fails to load
+        // — the URLs are signed and expire after 24h) a coloured disc with the letter.
+        function renderInkIcon(ink, extraClass = '') {
+            const url = inkSymbolUrls[ink.key];
+            const cls = `ink-icon${extraClass ? ' ' + extraClass : ''}`;
+            const attrs = `style="--ink:${ink.hex}" data-letter="${esc(ink.letter)}"`;
+            if (!url) return `<span class="${cls} ink-fallback" ${attrs}></span>`;
+            return `<span class="${cls}" ${attrs}><img src="${esc(url)}" alt="" data-ink="${esc(ink.key)}" decoding="async" onerror="onInkImgError(this)"></span>`;
+        }
+
+        function renderInkIcons(inks, extraClass = '') {
+            if (!inks || inks.length === 0) return '';
+            const label = inks.map(i => i.name).join(', ');
+            return `<span class="ink-icons" role="img" title="${esc(label)}" aria-label="Inks: ${esc(label)}">${inks.map(i => renderInkIcon(i, extraClass)).join('')}</span>`;
+        }
+
+        // Inline onerror target (generated HTML can't use addEventListener cheaply for
+        // ~2 icons × 1,600 rows). Drop the URL so the next render goes straight to the
+        // fallback, and so a fresher signed URL from a later poll can replace it.
+        function onInkImgError(img) {
+            const key = img.dataset.ink;
+            if (key && inkSymbolUrls[key] === img.getAttribute('src')) delete inkSymbolUrls[key];
+            img.parentNode?.classList.add('ink-fallback');
+            img.remove();
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Registrations → names and deck ids
+        // ═══════════════════════════════════════════════════════════
+        const DECK_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+        function applyRegistrations(regs) {
+            for (const reg of regs) {
+                const uid = reg.user?.id ?? null;
+                if (uid == null) continue;
+                playerNames[uid] = reg.best_identifier ?? reg.user?.best_identifier ?? 'Unknown';
+                // The worker only forwards UUID-shaped deck paths, so anything else
+                // could never be fetched — don't offer a button for it.
+                if (typeof reg.deck_id === 'string' && DECK_UUID_RE.test(reg.deck_id)) {
+                    playerDeckIds[uid] = reg.deck_id;
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
+        //  Decklist modal
+        // ═══════════════════════════════════════════════════════════
+        function apiFetchDeck(deckId) {
+            if (!deckCache.has(deckId)) {
+                const p = phFetch(`/deckbuilder/decks/${deckId}/`);
+                // A failed load must not stick — let Retry (or reopening) try again
+                p.catch(() => deckCache.delete(deckId));
+                deckCache.set(deckId, p);
+            }
+            return deckCache.get(deckId);
+        }
+
+        // Display order for card-type groups; anything else follows, alphabetically.
+        const DECK_TYPE_ORDER = ['Character', 'Action', 'Item', 'Location'];
+        const DECK_TYPE_PLURAL = { Character: 'Characters', Action: 'Actions', Item: 'Items', Location: 'Locations' };
+
+        function deckCardEntries(deck) {
+            const out = [];
+            for (const section of (deck.sections ?? [])) {
+                for (const c of (section.cards ?? [])) {
+                    const card = c.card ?? {};
+                    const av = card.attribute_values ?? {};
+                    const qty = Number(c.quantity) || 1;
+                    const name = av.Name ?? card.name ?? 'Unknown card';
+                    const version = av.Version ?? null;
+                    const inks = (Array.isArray(av.Ink) ? av.Ink : [])
+                        .map(i => makeInk(i?.option)).filter(Boolean);
+                    const cost = Number.isFinite(av['Ink Cost']) ? av['Ink Cost'] : null;
+                    out.push({
+                        qty, name, version, inks, cost,
+                        inkable: av.Inkable === true,
+                        type: card.type ?? 'Other',
+                        section: section.name ?? 'Deck',
+                        // "Name - Version": the line format deck builders import
+                        fullName: card.display_name ?? (version ? `${name} - ${version}` : name),
+                    });
+                }
+            }
+            return out;
+        }
+
+        function deckToText(entries) {
+            return entries.map(e => `${e.qty} ${e.fullName}`).join('\n');
+        }
+
+        function renderDeckBodyHTML(deck, entries) {
+            if (entries.length === 0) {
+                return `<p class="deck-empty">This decklist has no cards.</p>`;
+            }
+            const total = entries.reduce((a, e) => a + e.qty, 0);
+            const inkable = entries.filter(e => e.inkable).reduce((a, e) => a + e.qty, 0);
+            const sectionNames = [...new Set(entries.map(e => e.section))];
+            const multiSection = sectionNames.length > 1;
+
+            const groupKey = e => (multiSection ? `${e.section} · ` : '') + e.type;
+            const groups = new Map();
+            for (const e of entries) {
+                const k = groupKey(e);
+                if (!groups.has(k)) groups.set(k, { section: e.section, type: e.type, cards: [] });
+                groups.get(k).cards.push(e);
+            }
+            const typeRank = t => { const i = DECK_TYPE_ORDER.indexOf(t); return i === -1 ? DECK_TYPE_ORDER.length : i; };
+            const ordered = [...groups.values()].sort((a, b) =>
+                sectionNames.indexOf(a.section) - sectionNames.indexOf(b.section)
+                || typeRank(a.type) - typeRank(b.type)
+                || a.type.localeCompare(b.type));
+
+            const groupsHTML = ordered.map(g => {
+                g.cards.sort((a, b) => (a.cost ?? 99) - (b.cost ?? 99) || a.name.localeCompare(b.name));
+                const count = g.cards.reduce((a, e) => a + e.qty, 0);
+                const title = (multiSection ? `${g.section} · ` : '') + (DECK_TYPE_PLURAL[g.type] ?? g.type);
+                const rows = g.cards.map(e => {
+                    const costTitle = `Cost ${e.cost ?? '?'} · ${e.inkable ? 'inkable' : 'uninkable'}`;
+                    return `<li class="deck-card">
+                        <span class="deck-qty">${e.qty}</span>
+                        <span class="deck-cost${e.inkable ? '' : ' uninkable'}" title="${esc(costTitle)}" aria-label="${esc(costTitle)}">${e.cost ?? '?'}</span>
+                        <span class="deck-name">${esc(e.name)}${e.version ? `<span class="deck-version"> – ${esc(e.version)}</span>` : ''}</span>
+                        ${renderInkIcons(e.inks, 'ink-sm')}
+                    </li>`;
+                }).join('');
+                return `<section class="deck-group">
+                    <h3>${esc(title)} <span class="deck-group-count">${count}</span></h3>
+                    <ul>${rows}</ul>
+                </section>`;
+            }).join('');
+
+            return `<div class="deck-summary">${total} cards · ${inkable} inkable</div>
+                ${groupsHTML}
+                <p class="deck-legend"><span class="deck-cost">3</span> inkable <span class="deck-cost uninkable">3</span> uninkable · number = ink cost</p>`;
+        }
+
+        function setDeckDialogHead(playerName, deck) {
+            document.getElementById('deck-dialog-title').textContent = playerName;
+            const sub = document.getElementById('deck-dialog-sub');
+            if (!deck) { sub.innerHTML = ''; return; }
+            const inks = parseDescriptorInks(deck.descriptor_label);
+            const name = (deck.name ?? '').trim();
+            sub.innerHTML = `${renderInkIcons(inks)}${name ? `<span class="deck-dialog-deckname">${esc(name)}</span>` : ''}`;
+        }
+
+        async function openDeckDialog(playerId) {
+            const deckId = playerDeckIds[playerId];
+            if (!deckId) return;
+            const token = ++deckDialogToken;
+            const dialog = document.getElementById('deck-dialog');
+            const body = document.getElementById('deck-dialog-body');
+            const copyBtn = document.getElementById('deck-copy-btn');
+            const copyNote = document.getElementById('deck-copy-note');
+            const playerName = playerNames[playerId] ?? 'Unknown player';
+
+            setDeckDialogHead(playerName, null);
+            body.innerHTML = `<div class="deck-loading"><div class="spinner"></div><p>Loading decklist…</p></div>`;
+            copyBtn.disabled = true;
+            copyBtn.onclick = null;
+            copyNote.textContent = '';
+            if (!dialog.open) dialog.showModal();
+            document.body.classList.add('modal-open');
+            body.scrollTop = 0;
+
+            let deck;
+            try {
+                deck = await apiFetchDeck(deckId);
+            } catch (err) {
+                if (token !== deckDialogToken) return;
+                console.warn('Decklist load failed:', err);
+                body.innerHTML = `<div class="deck-error">
+                    <p>Couldn't load this decklist.</p>
+                    <p class="deck-error-detail">${esc(err.message)}</p>
+                    <button class="btn-primary" id="deck-retry-btn">Try again</button>
+                </div>`;
+                document.getElementById('deck-retry-btn').addEventListener('click', () => openDeckDialog(playerId));
+                return;
+            }
+            if (token !== deckDialogToken) return;   // closed, or another deck opened meanwhile
+
+            const entries = deckCardEntries(deck);
+            setDeckDialogHead(playerName, deck);
+            body.innerHTML = renderDeckBodyHTML(deck, entries);
+            copyBtn.disabled = entries.length === 0;
+            copyBtn.onclick = async () => {
+                try {
+                    await navigator.clipboard.writeText(deckToText(entries));
+                    copyNote.textContent = 'Copied';
+                } catch {
+                    copyNote.textContent = 'Copy failed — your browser blocked clipboard access';
+                }
+            };
+
+            // The deck itself is the authority on its inks — fill them in for players
+            // whose event doesn't send them with the match records.
+            if (!playerInks[playerId]) {
+                const inks = parseDescriptorInks(deck.descriptor_label);
+                if (inks) { playerInks[playerId] = inks; renderStandings(); }
+            }
+        }
+
+        function closeDeckDialog() {
+            deckDialogToken++;   // orphan any load still in flight
+            const dialog = document.getElementById('deck-dialog');
+            if (dialog.open) dialog.close();
+            document.body.classList.remove('modal-open');
+        }
+
+        // ═══════════════════════════════════════════════════════════
         //  Render standings table
         // ═══════════════════════════════════════════════════════════
         function renderStandings() {
@@ -777,6 +1072,8 @@
 
             const thead = `<thead><tr>${colHdrs.join('')}</tr></thead>`;
 
+            const anyInks = standings.some(s => playerInks[s.playerId]);
+
             const rows = standings.map((s, idx) => {
                 const inCut = cut > 0 && idx < cut;
                 const isCutBorder = cut > 0 && idx === cut;  // first row outside top cut
@@ -796,7 +1093,15 @@
                 const idBtn = canCheckID
                     ? ` <button class="id-btn${activeIDPlayerId === s.playerId ? ' active' : ''}" data-player-id="${s.playerId}" title="Check if safe to intentionally draw">🤝</button>`
                     : '';
-                const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${esc(s.name)}${droppedBadge}${idBtn}</span></td>`;
+                // Ink icons lead the name in a fixed-width slot (only when the event has
+                // any), so names stay aligned for players whose inks aren't known.
+                const inkSlot = anyInks
+                    ? `<span class="ink-slot">${renderInkIcons(playerInks[s.playerId])}</span>`
+                    : '';
+                const deckBtn = playerDeckIds[s.playerId]
+                    ? ` <button class="deck-btn" data-player-id="${s.playerId}" title="View decklist" aria-label="View ${esc(s.name)}'s decklist">🗒️</button>`
+                    : '';
+                const nameCell = `<td style="font-weight:500"><span style="display:flex;align-items:center;gap:0.35rem;flex-wrap:nowrap">${inkSlot}${esc(s.name)}${deckBtn}${droppedBadge}${idBtn}</span></td>`;
 
                 // Determine row background — live view of a running event only.
                 // Red = knocked out; green = finished playing in the round
@@ -2023,6 +2328,20 @@
                 seen.add(rnd.id);
                 await fetchRoundAndStore(rnd);
             }
+
+            // Registrations only carry deck_id once the organiser publishes decklists,
+            // which can happen mid-event. Re-read them once when that status flips —
+            // last, and on its own, so a failure here never costs the standings update
+            // (the status is left unrecorded, so the next poll tries again).
+            const dlStatus = newEvent.settings?.decklist_status ?? null;
+            if (dlStatus === 'PUBLISHED' && decklistStatusAtRegFetch !== 'PUBLISHED') {
+                try {
+                    applyRegistrations(await apiFetchRegistrations());
+                    decklistStatusAtRegFetch = dlStatus;
+                } catch (err) {
+                    console.warn('Registration refresh for decklists failed:', err);
+                }
+            }
         }
 
         // ═══════════════════════════════════════════════════════════
@@ -2115,11 +2434,8 @@
                 setLoadingMsg('Fetching registrations…');
                 const regs = await apiFetchRegistrations();
                 if (registrationCount === 0) registrationCount = regs.length;
-                for (const reg of regs) {
-                    const uid = reg.user?.id ?? null;
-                    const name = reg.best_identifier ?? reg.user?.best_identifier ?? 'Unknown';
-                    if (uid != null) playerNames[uid] = name;
-                }
+                applyRegistrations(regs);
+                decklistStatusAtRegFetch = eventData.settings?.decklist_status ?? null;
 
                 // Fetch match data for all rounds
                 setLoadingMsg('Fetching match data…');
@@ -2158,6 +2474,8 @@
             lastSuccessAt = null; consecutivePollFailures = 0;
             eventData = null; rounds = []; matchesByRound = {}; roundFingerprints = {};
             playerNames = {}; allPlayerIds = []; registrationCount = 0;
+            playerInks = {}; inkSymbolUrls = {}; playerDeckIds = {}; decklistStatusAtRegFetch = null; deckCache = new Map();
+            closeDeckDialog();
             isEventComplete = false; activeIDPlayerId = null; standingsRoundIdx = null; projectionEnabled = false; showDrawOutcomes = true; lastProjectionRenderKey = null;
             document.getElementById('header-title').textContent = '🎴 Watch Event';
             document.title = 'Watch Event — Set Championships';
@@ -2230,6 +2548,20 @@
             document.getElementById('correction-reload-btn').addEventListener('click', reloadAfterCorrection);
             correctionDialog.addEventListener('cancel', reloadAfterCorrection);
             correctionDialog.addEventListener('close', reloadAfterCorrection);
+
+            // Decklist modal. One delegated listener for every row's 🗒️ button —
+            // the standings are re-rendered each poll and can run to ~1,600 rows.
+            document.getElementById('standings-container').addEventListener('click', e => {
+                const btn = e.target.closest('.deck-btn[data-player-id]');
+                if (!btn) return;
+                openDeckDialog(parseInt(btn.dataset.playerId, 10));
+            });
+            const deckDialog = document.getElementById('deck-dialog');
+            document.getElementById('deck-dialog-close').addEventListener('click', closeDeckDialog);
+            // Escape fires 'cancel' then 'close'; 'close' covers every way out.
+            deckDialog.addEventListener('close', closeDeckDialog);
+            // A click on the backdrop lands on the <dialog> element itself
+            deckDialog.addEventListener('click', e => { if (e.target === deckDialog) closeDeckDialog(); });
 
             // Wire "Change event" button
             document.getElementById('change-event-btn').addEventListener('click', () => {

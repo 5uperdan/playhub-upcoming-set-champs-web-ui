@@ -17,4 +17,12 @@ The deployed URL is hardcoded as `API_PROXY_BASE` in `docs/watch.html` —
 update it there if the worker is renamed or moved to another account.
 
 Free-plan limits: 100k requests/day, ~1k/min burst. The watch page costs
-~6–12 requests per page load and ~3.2/min per polling viewer.
+~6–12 requests per page load and ~3.2/min per polling viewer. Large events
+cost more on load — registrations are paged 100 at a time, so a 1,600-player
+event is ~17 requests before any match data.
+
+Allowed paths (`ALLOWED_PATH`): `/events/{id}…`, `/tournament-rounds/{id}…`,
+and `/deckbuilder/decks/{uuid}/` — one published decklist, fetched only when a
+viewer opens it from the standings (one request per deck opened). Until the
+dashboard copy is redeployed with the deck path, the watch page's decklist
+modal shows "Couldn't load this decklist" with `API error 404`.

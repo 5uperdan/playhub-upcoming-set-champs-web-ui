@@ -10,9 +10,11 @@
 
 const API_BASE = 'https://api.cloudflare.ravensburgerplay.com/hydraproxy/api/v2';
 // Paths the watch page actually uses: /events/{id}/, /events/{id}/registrations/,
-// /tournament-rounds/{id}/matches/paginated/. Numeric id right after the prefix
-// keeps this from being an open proxy.
-const ALLOWED_PATH = /^\/(events|tournament-rounds)\/\d+/;
+// /tournament-rounds/{id}/matches/paginated/, and a single published decklist at
+// /deckbuilder/decks/{uuid}/ (opened one at a time from the standings). A numeric
+// id right after the prefix, or an exact deck UUID, keeps this from being an open
+// proxy.
+const ALLOWED_PATH = /^\/(?:(?:events|tournament-rounds)\/\d+|deckbuilder\/decks\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$)/i;
 
 const CORS_HEADERS = {
     'Access-Control-Allow-Origin': '*',
